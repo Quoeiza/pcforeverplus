@@ -2114,6 +2114,14 @@ end
 ---------------------------------------------------------------------------
 -- Tab 1: Recipes
 ---------------------------------------------------------------------------
+-- Profit %: the higher of selling at auction and to a vendor, and which one it is
+function UI:BestPct(e)
+    local a, v = e.ahProfitPct, e.vendorProfitPct
+    if a and (not v or a >= v) then return a, "AH" end
+    if v then return v, "Vendor" end
+    return e.profitPct, e.route
+end
+
 UI.ROUTE_TEXT = { AH = "selling at auction", Vendor = "selling to a vendor", Disenchant = "disenchanting it" }
 -- what stops the Craftable at Profit count
 UI.CRAFT_WHY = { gold = "your gold or spending limit, deposits included", market = "Auction listings run out",
@@ -2230,7 +2238,7 @@ function UI:CreateRecipesPage(p)
         { "vendorSell", "Sells at vendor", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
         { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut.", fit = "money" },
         { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
-        { "profitPct", "Profit %", 48, "Profit as a % of material cost, for how it's sold (auction, vendor or disenchanting).", fit = "pct" },
+        { "profitPct", "Profit %", 48, "Profit as a % of material cost, at auction or to a vendor, whichever is higher.", fit = "pct" },
         { "listed", "Listed", 52, "How many are at auction now.", fit = "num" },
         { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction.", fit = "num" },
         { "craftable", "Craftable at Profit", 64, "How many you can craft at a profit (auction or vendor) with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. The recipe's tooltip says how many clear your minimum profit, where buying stops. ~ = a material has no live listings.", fit = "num" },
@@ -2393,9 +2401,10 @@ function UI:CreateRecipesPage(p)
                 tip[#tip + 1] = e.matsPicked and "|cff888888You picked this on the Crafting plan tab.|r"
                     or "|cff888888Using whichever makes more. Pick one on the Crafting plan tab.|r"
             end
-            if e.profitPct then
-                tip[#tip + 1] = ("Profit %%: |cffffffff%d%%|r of material cost, %s."):format(math.floor(e.profitPct + 0.5),
-                    UI.ROUTE_TEXT[e.route] or "the way it's sold")
+            local bestPct, bestWay = UI:BestPct(e)
+            if bestPct then
+                tip[#tip + 1] = ("Profit %%: |cffffffff%d%%|r of material cost, %s."):format(math.floor(bestPct + 0.5),
+                    UI.ROUTE_TEXT[bestWay] or "the way it's sold")
             end
             for _, l in ipairs(UI:CraftableLines(e)) do tip[#tip + 1] = l end
             if e.lastSoldDays then
@@ -2645,6 +2654,7 @@ function UI:UpdateRecipes()
         if k == "name" then return e.r.name:lower() end
         if k == "sell" then return e.ahFlip and e.sellAH or e.sell end -- (an AH flip: its price on the AH)
         if k == "vendorSell" then return e.vendorSell end
+        if k == "profitPct" then return (UI:BestPct(e)) end
         local ci = CRAFT_I[k]
         if ci then
             local n, _, _, tAH, tV, _, _, nAH, nV = PC:Craftable(e)
@@ -2712,7 +2722,7 @@ function UI:UpdateRecipeRows()
             else
                 FitCell(c.vendorProfit, PC:Money(v, true))
             end
-            local pct = e.profitPct
+            local pct = UI:BestPct(e)
             if pct == nil then FitCell(c.profitPct, "|cff888888?|r")
             else
                 local shown = pct >= 10000 and ">9999" or tostring(math.floor(pct + 0.5))

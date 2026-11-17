@@ -18,6 +18,7 @@ News.NOTES_FOREVER = {
     new = {
         "Every recipe has a separate Auction Profit and Vendor Profit. They replace the single Profit column and appear in the tables, tooltips, Make me gold, sale notes, the Purge list and \"Now profitable\" alerts.",
         "New Sells at vendor column, next to Sells at auction.",
+        "Profit % shows the higher of the auction and vendor percentages, and the recipe tooltip says which.",
         "New Minimum profit setting, 10% by default. Recipes below it are hidden. Skill up and Gear upgrades plans ignore it.",
         "\"Only profitable\" is replaced by two boxes, \"Only 10%+ Auction profit\" and \"Only 10%+ Vendor profit\", on the Recipes and Learn pages. With both ticked, a recipe has to meet both.",
         "New Craftable at Profit, Total Auction Profit and Total Vendor Profit columns. They price the whole batch against the real listings, not just the cheapest one, and allow for your gold, what is listed, your bag space and auction deposits.",
