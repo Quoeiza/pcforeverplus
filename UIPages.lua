@@ -7,7 +7,7 @@ local P = UI.Parts
 local HasTemplate = P.HasTemplate
 local Text = P.Text
 local CraftButton = P.CraftButton
-local HeaderButton = P.HeaderButton
+local Columns, FitCell, PW, RW, LIST_Y = P.Columns, P.FitCell, P.PW, P.RW, P.LIST_Y
 local HeaderStrip = P.HeaderStrip
 local ItemIcon = P.ItemIcon
 local Panel = P.Panel
@@ -29,23 +29,29 @@ local CLICK_HINT = P.CLICK_HINT
 ---------------------------------------------------------------------------
 -- Tab 3: Scanned items
 ---------------------------------------------------------------------------
+local ITEMS_H = -LIST_Y + ITEM_ROWS * ITEM_ROW_H + 22 -- the table, with the count line under it
+
 function UI:CreateItemsPage(p)
-    self.itemSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -60, 750))
+    self.itemSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -60, PW - 8))
     self.itemSummary:SetWordWrap(true)
     self.itemSummary:SetSpacing(3)
 
-    local lp = Panel(p, 12, -112, 756, 28 + ITEM_ROWS * ITEM_ROW_H + 22)
-    HeaderStrip(lp, 748)
-    HeaderButton(lp, 4, 254, "Item")
-    HeaderButton(lp, 258, 130, "Used as")
-    HeaderButton(lp, 388, 90, "AH price", nil, "RIGHT")
-    HeaderButton(lp, 478, 80, "Trend", nil, "RIGHT")
-    HeaderButton(lp, 558, 84, "Vendor", nil, "RIGHT")
-    HeaderButton(lp, 646, 106, "Status")
+    local lp = Panel(p, 12, -112, PW, ITEMS_H)
+    HeaderStrip(lp)
+    local cols = {
+        { "name", "Item", nil, "Every item your recipes make or use.", text = true },
+        { "usage", "Used as", 150, "Made by your recipes (crafted), a material, or both. Materials: how many of your recipes use it." },
+        { "ah", "Auction price", 100, "The cheapest price at auction at the last scan (or from Auctionator or TSM)." },
+        { "trend", "Trend", 90, "Now against its usual price." },
+        { "vendor", "Vendor charges", 100, "What a vendor charges you, after Bartering (not what a vendor pays you)." },
+        { "status", "Status", 110, "Priced at the last scan, not at auction, or not scanned yet.", text = true },
+    }
+    self.itemHeaders = Columns(lp, cols, "items")
+    local C = cols.by
 
     local list = CreateFrame("Frame", nil, lp)
-    list:SetPoint("TOPLEFT", 4, -28)
-    list:SetSize(748, ITEM_ROWS * ITEM_ROW_H)
+    list:SetPoint("TOPLEFT", 4, LIST_Y)
+    list:SetSize(RW, ITEM_ROWS * ITEM_ROW_H)
     list:EnableMouseWheel(true)
     list:SetScript("OnMouseWheel", function(_, delta)
         UI.itemOffset = UI.itemOffset - delta * 3
@@ -58,7 +64,7 @@ function UI:CreateItemsPage(p)
     for i = 1, ITEM_ROWS do
         local row = CreateFrame("Button", nil, list)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        row:SetSize(748, ITEM_ROW_H)
+        row:SetSize(RW, ITEM_ROW_H)
         row:SetPoint("TOPLEFT", 0, -(i - 1) * ITEM_ROW_H)
         row:EnableMouse(true)
         Stripe(row, i)
@@ -79,13 +85,10 @@ function UI:CreateItemsPage(p)
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetSize(15, 15)
         row.icon:SetPoint("LEFT", 6, 0)
-        row.name = RowText(row, 26, 226)
-        row.usage = RowText(row, 258, 126)
-        row.ah = RowText(row, 384, 90, "RIGHT")
-        row.trend = RowText(row, 474, 80, "RIGHT")
-        row.vendor = RowText(row, 554, 84, "RIGHT")
-        row.status = RowText(row, 648, 100)
-        row:SetScript("OnEnter", function(r) r.hl:Show(); ShowTooltip(r, r.tip, r.itemID) end)
+        row.name = RowText(row, 26, C.name.w - 30)
+        for _, k in ipairs({ "usage", "ah", "trend", "vendor", "status" }) do row[k] = RowText(row, C[k].x, C[k].w - 4, "RIGHT") end
+        -- (the tooltip is put together when you point at the row, not on every redraw)
+        row:SetScript("OnEnter", function(r) r.hl:Show(); ShowTooltip(r, r.data and UI:ItemTip(r.data), r.itemID) end)
         row:SetScript("OnLeave", function(r) r.hl:Hide(); GameTooltip:Hide() end)
         row:SetScript("OnClick", function(r, button)
             if UI:ClickItem(r.itemID, button) then return end
@@ -98,15 +101,15 @@ function UI:CreateItemsPage(p)
         end)
         self.itemRows[i] = row
     end
-    self.itemCount = Text(lp, "GameFontDisableSmall", 10, -(28 + ITEM_ROWS * ITEM_ROW_H + 4), 730) -- below the last row
+    self.itemCount = Text(lp, "GameFontDisableSmall", 10, LIST_Y - ITEM_ROWS * ITEM_ROW_H - 4, RW - 12) -- below the last row
 
-    PC:Safe("price chart", self.CreateItemChart, self, p, -(112 + 28 + ITEM_ROWS * ITEM_ROW_H + 22 + 6))
+    PC:Safe("price chart", self.CreateItemChart, self, p, -(112 + ITEMS_H + 6))
 end
 
 ---------------------------------------------------------------------------
 -- Price chart for the selected scanned item
 ---------------------------------------------------------------------------
-local IC_W, IC_H = 756, 146
+local IC_W, IC_H = PW, 138
 local IC_X, IC_Y = 70, 22                 -- plot's left / bottom margins
 local IC_PW, IC_PH = IC_W - IC_X - 16, IC_H - IC_Y - 34
 
@@ -291,7 +294,7 @@ function UI:UpdateItems()
     table.sort(profs)
 
     local lines = {
-        ("|cffffd100%d items|r from |cffffd100%d recipes|r:   |cff40ff40%d priced|r,   |cffff8040%d not on the AH|r,   |cffff5555%d not scanned yet|r"):format(
+        ("|cffffd100%d items|r from |cffffd100%d recipes|r:   |cff40ff40%d priced|r,   |cffff8040%d not at auction|r,   |cffff5555%d not scanned yet|r"):format(
             #items, nRecipes, nPriced, nNotListed, nNever),
     }
     if #skippedRows > 0 then
@@ -299,15 +302,64 @@ function UI:UpdateItems()
             table.concat(profs, ", "))
     end
     if nNever > 0 then
-        lines[#lines + 1] = "|cffff8040\"Not scanned\" items haven't been checked yet. Open the Auction House and click Scan AH.|r"
+        lines[#lines + 1] = "|cffff8040\"Not scanned\" items haven't been checked yet. Open the Auction House and click Scan auctions.|r"
     end
     self.itemSummary:SetText(table.concat(lines, "\n"))
 
     local rows = {}
     for _, e in ipairs(items) do rows[#rows + 1] = e end
-    for _, s in ipairs(skippedRows) do rows[#rows + 1] = s end
+    -- sorted by the column you picked; skipped recipes (nothing to price) stay at the bottom
+    local s = self:SortState("items")
+    UI.SortRows(rows, s.key, s.dir, function(e, k)
+        if k == "name" then return (e.name or ""):lower() end
+        if k == "usage" then return (e.made > 0 and 1000 or 0) + e.used end -- crafted first, then the most-used materials
+        if k == "status" then return e.state end
+        return e[k] -- (vendor items have no trend)
+    end, function(e) return (e.name or ""):lower() end)
+    self:PaintHeaders(self.itemHeaders, "items")
+    for _, sk in ipairs(skippedRows) do rows[#rows + 1] = sk end
     self.itemData = rows
     self:UpdateItemRows()
+end
+
+-- An item's tooltip lines (put together on hover)
+function UI:ItemTip(e)
+    if e.skipped then return { e.name, ("%s recipe skipped: %s."):format(e.prof, e.why) } end
+    local tip = { e.name }
+    if e.made > 0 then tip[#tip + 1] = ("Made by %d of your recipes."):format(e.made) end
+    if e.used > 0 then tip[#tip + 1] = ("Material in %d of your recipes."):format(e.used) end
+    if e.trend then
+        tip[#tip + 1] = ("Usually %s; now %s (%s%d%%)."):format(PC:Money(e.usual), PC:Money(e.ah),
+            e.trend >= 0 and "+" or "-", math.floor(math.abs(e.trend) + 0.5))
+    else
+        tip[#tip + 1] = "Trend appears after 3 scans on different days or times."
+    end
+    if e.listed then tip[#tip + 1] = ("%d listed at auction."):format(e.listed) end
+    if e.source == "Auctionator" then
+        tip[#tip + 1] = "|cff40c0ffPrice from Auctionator's saved data.|r"
+    elseif e.source == "TSM" then
+        tip[#tip + 1] = "|cff40c0ffPrice from TradeSkillMaster's data.|r"
+    elseif e.source and e.source ~= "own" then
+        tip[#tip + 1] = ("|cff40c0ffPrice from %s.|r"):format(e.source)
+    end
+    tip[#tip + 1] = " "
+    for _, line in ipairs(PC:SalesTooltip(e.id)) do tip[#tip + 1] = line end
+    tip[#tip + 1] = " "
+    if e.checked then
+        tip[#tip + 1] = ("Auction House last checked %s ago."):format(PC:Ago(time() - e.checked))
+    else
+        tip[#tip + 1] = "Not checked on the Auction House yet."
+    end
+    if e.state == 2 and e.vendor then
+        tip[#tip + 1] = "None at auction, but a vendor sells it."
+    elseif e.state == 2 then
+        tip[#tip + 1] = "None at auction at the last scan."
+    end
+    tip[#tip + 1] = " "
+    for _, l in ipairs(PC:PriceSourceLines(e.id)) do tip[#tip + 1] = l end
+    tip[#tip + 1] = " "
+    for _, l in ipairs(PC:DepthLines(e.id)) do tip[#tip + 1] = l end
+    return tip
 end
 
 function UI:UpdateItemRows()
@@ -334,8 +386,7 @@ function UI:UpdateItemRows()
             row.trend:SetText("")
             row.vendor:SetText("")
             row.status:SetText("|cff888888Skipped|r")
-            row.tip = { e.name, ("%s recipe skipped: %s."):format(e.prof, e.why) }
-            row.itemID = nil
+            row.data, row.itemID = e, nil
             row:Show()
         else
             row.icon:SetTexture(ItemIcon(e.id))
@@ -350,56 +401,18 @@ function UI:UpdateItemRows()
             row.vendor:SetText(e.vendor and PC:Money(e.vendor) or "")
             row.status:SetText((e.state == 4 and e.source == "TSM") and "|cff40c0ffTSM|r" or STATUS_TEXT[e.state])
             local media = "Interface\\AddOns\\" .. ADDON .. "\\Media\\"
-            local up = "|T" .. media .. "SortUp:12:12:0:0|t"
-            local down = "|T" .. media .. "SortDown:12:12:0:0|t"
             if PC:IsVendorItem(e.id) then
                 row.trend:SetText("|cff888888vendor|r")
             elseif not e.trend then
                 row.trend:SetText("|cff888888--|r")
             elseif e.trend >= 10 then
-                row.trend:SetText(("|cff40ff40%s%d%%|r"):format(up, math.floor(e.trend + 0.5)))
+                row.trend:SetText(("|cff40ff40|T%sSortUp:12:12:0:0|t%d%%|r"):format(media, math.floor(e.trend + 0.5)))
             elseif e.trend <= -10 then
-                row.trend:SetText(("|cffff5555%s%d%%|r"):format(down, math.floor(-e.trend + 0.5)))
+                row.trend:SetText(("|cffff5555|T%sSortDown:12:12:0:0|t%d%%|r"):format(media, math.floor(-e.trend + 0.5)))
             else
-                row.trend:SetText("|cffcccccc steady|r")
+                row.trend:SetText("|cffccccccsteady|r")
             end
-
-            local tip = { e.name }
-            if e.made > 0 then tip[#tip + 1] = ("Made by %d of your recipes."):format(e.made) end
-            if e.used > 0 then tip[#tip + 1] = ("Material in %d of your recipes."):format(e.used) end
-            if e.trend then
-                tip[#tip + 1] = ("Usually %s; now %s (%s%d%%)."):format(PC:Money(e.usual), PC:Money(e.ah),
-                    e.trend >= 0 and "+" or "-", math.floor(math.abs(e.trend) + 0.5))
-            else
-                tip[#tip + 1] = "Trend appears after 3 scans on different days or times."
-            end
-            if e.listed then tip[#tip + 1] = ("%d listed on the AH."):format(e.listed) end
-            if e.source == "Auctionator" then
-                tip[#tip + 1] = "|cff40c0ffPrice from Auctionator's saved data.|r"
-            elseif e.source == "TSM" then
-                tip[#tip + 1] = "|cff40c0ffPrice from TradeSkillMaster's data.|r"
-            elseif e.source and e.source ~= "own" then
-                tip[#tip + 1] = ("|cff40c0ffPrice from %s.|r"):format(e.source)
-            end
-            tip[#tip + 1] = " "
-            for _, line in ipairs(PC:SalesTooltip(e.id)) do tip[#tip + 1] = line end
-            tip[#tip + 1] = " "
-            if e.checked then
-                tip[#tip + 1] = ("Auction House last checked %s ago."):format(PC:Ago(time() - e.checked))
-            else
-                tip[#tip + 1] = "Not checked on the Auction House yet."
-            end
-            if e.state == 2 and e.vendor then
-                tip[#tip + 1] = "Nobody is selling it on the AH, but a vendor sells it."
-            elseif e.state == 2 then
-                tip[#tip + 1] = "Nobody was selling it on the AH at the last scan."
-            end
-            tip[#tip + 1] = " "
-            for _, l in ipairs(PC:PriceSourceLines(e.id)) do tip[#tip + 1] = l end
-            tip[#tip + 1] = " "
-            for _, l in ipairs(PC:DepthLines(e.id)) do tip[#tip + 1] = l end
-            row.tip = tip
-            row.itemID = e.id
+            row.data, row.itemID = e, e.id
             row:Show()
         end
         local on = e and e.id and not e.skipped and e.id == self.itemSel
@@ -432,7 +445,7 @@ local function Picked(b, on)
         if on then fs:SetTextColor(1, 1, 1) else fs:SetTextColor(1, 0.86, 0.42) end
     end
 end
-local CHART_W, CHART_H = 696, 232
+local CHART_W, CHART_H = PW, 224
 local PLOT_X, PLOT_Y = 64, 26               -- left / bottom margins inside the chart
 local PLOT_W = CHART_W - PLOT_X - 12
 local PLOT_H = CHART_H - PLOT_Y - 30
@@ -448,7 +461,7 @@ function UI:CreatePnLPage(p)
         b.days = r[1]
         b:SetScript("OnClick", function(btn)
             UI.pnlRange = btn.days
-            UI:Refresh()
+            UI:Redraw()
         end)
         self.rangeButtons[i] = b
     end
@@ -464,8 +477,8 @@ function UI:CreatePnLPage(p)
     -- What to count: only gold moved by ProfitCrafter's trades, or every change to your gold
     self.modeButtons = {}
     local modes = {
-        { "app", "ProfitCrafter only", "Only what ProfitCrafter records: AH buys and sales, AH fees and vendor sales." },
-        { "all", "All gold", "Every change to your gold: quests, loot, repairs, mail, trades, the AH, everything.\nCounts from the moment this was added (v0.60), while you're logged in on this character." },
+        { "app", "ProfitCrafter only", "Only what ProfitCrafter records: auction buys and sales, auction fees and vendor sales." },
+        { "all", "All gold", "Every change to your gold: quests, loot, repairs, mail, trades, the Auction House, everything.\nCounts from the moment this was added (v0.60), while you're logged in on this character." },
     }
     for i, m in ipairs(modes) do
         local b = CreateFrame("Button", nil, cp, "UIPanelButtonTemplate")
@@ -476,7 +489,7 @@ function UI:CreatePnLPage(p)
         b.mode = m[1]
         b:SetScript("OnClick", function(btn)
             PC.db.pnlMode = btn.mode
-            UI:Refresh()
+            UI:Redraw()
         end)
         b:SetScript("OnEnter", function(btn) ShowTooltip(btn, { m[2], m[3] }) end)
         b:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -517,29 +530,34 @@ function UI:CreatePnLPage(p)
 
     self.bars, self.lines, self.dots = {}, {}, {}
 
-    -- Recent activity
-    local rp = Panel(p, 12, -328, 696, 146)
-    Text(rp, "GameFontNormal", 12, -9):SetText("Recent Auction House activity")
-    local function head(x, w, label, justify)
-        Text(rp, "GameFontNormalSmall", x, -28, w, justify):SetText(label)
-    end
-    head(12, 100, "When")
-    head(112, 70, "Type")
-    head(184, 330, "Item")
-    head(540, 140, "Amount", "RIGHT")
+    -- Recent activity: the last few trades (sortable like every table), under its title
+    local rp = Panel(p, 12, -(90 + CHART_H + 6), PW, 154)
+    Text(rp, "GameFontNormal", 12, -7):SetText("Recent Auction House activity")
+    local tb = CreateFrame("Frame", nil, rp)
+    tb:SetPoint("TOPLEFT", 0, -18)
+    tb:SetPoint("BOTTOMRIGHT", 0, 0)
+    HeaderStrip(tb)
+    local cols = {
+        { "t", "When", 110, "When it happened." },
+        { "kind", "Type", 100, "Bought, sold at auction, sold to a vendor, or an auction fee.", text = true },
+        { "item", "Item", nil, "What was bought or sold.", text = true },
+        { "signed", "Amount", 150, "Gold in (green) or out." },
+    }
+    self.recentHeaders = Columns(tb, cols, "recent")
+    local C = cols.by
     self.recentRows = {}
     for i = 1, RECENT_ROWS do
-        local row = CreateFrame("Frame", nil, rp)
-        row:SetSize(680, 19)
-        row:SetPoint("TOPLEFT", 6, -42 - (i - 1) * 19)
+        local row = CreateFrame("Frame", nil, tb)
+        row:SetSize(RW, 19)
+        row:SetPoint("TOPLEFT", 4, LIST_Y - (i - 1) * 19)
         Stripe(row, i)
-        row.when = RowText(row, 6, 100)
-        row.kind = RowText(row, 106, 70)
-        row.item = RowText(row, 178, 340)
-        row.amount = RowText(row, 534, 140, "RIGHT")
+        row.when = RowText(row, C.t.x, C.t.w - 4, "RIGHT")
+        row.kind = RowText(row, C.kind.x, C.kind.w - 4, "RIGHT")
+        row.item = RowText(row, C.item.x + 6, C.item.w - 10)
+        row.amount = RowText(row, C.signed.x, C.signed.w - 4, "RIGHT")
         self.recentRows[i] = row
     end
-    self.recentEmpty = rp:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    self.recentEmpty = tb:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     self.recentEmpty:SetPoint("CENTER", 0, -12)
 end
 
@@ -616,9 +634,19 @@ function UI:UpdatePnL()
     local ledger = PC.cdb.ledger
     local now = time()
 
-    -- Recent activity (newest first)
+    -- Recent activity: the newest few, in the order you sorted them (newest first to start with)
+    local recent = {}
+    for i = #ledger, math.max(#ledger - #self.recentRows + 1, 1), -1 do recent[#recent + 1] = ledger[i] end
+    local rs = self:SortState("recent")
+    UI.SortRows(recent, rs.key, rs.dir, function(e, k)
+        if k == "item" then return (e.item or ""):lower() end
+        if k == "signed" then return (e.kind == "sell" or e.kind == "vendor") and e.amount or -(e.amount or 0) end
+        return e[k]
+    end, function(e) return (e.item or ""):lower() end)
+    self:PaintHeaders(self.recentHeaders, "recent")
+    self.recentData = recent
     for i, row in ipairs(self.recentRows) do
-        local e = ledger[#ledger - i + 1]
+        local e = recent[i]
         if e then
             row.when:SetText(date("%m/%d %H:%M", e.t))
             local item = e.item or "Unknown item"
@@ -779,24 +807,39 @@ end
 ---------------------------------------------------------------------------
 local SELL_ROWS = 11
 
+local SELL_H = -LIST_Y + SELL_ROWS * ROW_H + 10
+
+-- A crafted item's AH Profit and V Profit for all you have (Sell:Items works both out: AH after its cut
+-- and the deposit); none in your bags: nothing to show
+function UI:SellProfits(it)
+    if not it or (it.have or 0) <= 0 then return nil, nil end
+    return it.ahProfit, it.vendorProfit
+end
+
 function UI:CreateSellPage(p)
-    local intro = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -62, 750))
+    local intro = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -62, PW - 8))
     intro:SetText("What you crafted from your plan (nothing else in your bags is touched). Price = the cheapest listing (no undercut), never below your cost" ..
         " (then it says |cffff8040Hold|r). " .. UI.DIM .. "Keep: always have this many; with Keep in stock on, the plan tops itself up.|r")
     intro:SetSpacing(2)
-    local lp = Panel(p, 12, -96, 756, 28 + SELL_ROWS * ROW_H + 10)
-    HeaderStrip(lp, 748)
-    HeaderButton(lp, 4, 236, "Crafted item")
-    HeaderButton(lp, 240, 50, "Have", nil, "RIGHT")
-    HeaderButton(lp, 294, 56, "Keep")
-    HeaderButton(lp, 350, 100, "Price each", nil, "RIGHT")
-    HeaderButton(lp, 450, 96, "Deposit", nil, "RIGHT")
-    HeaderButton(lp, 546, 100, "Profit", nil, "RIGHT")
+    local lp = Panel(p, 12, -96, PW, SELL_H)
+    HeaderStrip(lp)
+    local cols = {
+        { "name", "Crafted item", nil, "What you crafted from your plan. Below: spare materials a vendor buys back.", text = true },
+        { "have", "Have", 56, "How many you have." },
+        { "stock", "Keep", 64, "Always keep this many (type a number). Materials: ticked goes back to a vendor." },
+        { "price", "Price each", 100, "The price it's posted at: the cheapest listing, never below your cost." },
+        { "deposit", "Deposit", 110, "The Auction House's deposit for the best listing time." },
+        { "ahProfit", "Auction Profit", 100, "Profit selling all you have at auction, after its 5% cut and the deposit." },
+        { "vProfit", "Vendor Profit", 100, "Profit selling all you have to a vendor. Materials: what a vendor pays for them." },
+        { nil, nil, 100 }, -- the Post button
+    }
+    self.sellHeaders = Columns(lp, cols, "sell")
+    local C = cols.by
     self.sellRows = {}
     for i = 1, SELL_ROWS do
         local row = CreateFrame("Button", nil, lp)
-        row:SetSize(748, ROW_H)
-        row:SetPoint("TOPLEFT", 4, -28 - (i - 1) * ROW_H)
+        row:SetSize(RW, ROW_H)
+        row:SetPoint("TOPLEFT", 4, LIST_Y - (i - 1) * ROW_H)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         Stripe(row, i)
         local hl = row:CreateTexture(nil, "HIGHLIGHT")
@@ -805,27 +848,30 @@ function UI:CreateSellPage(p)
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
-        row.name = RowText(row, 30, 206)
-        row.have = RowText(row, 236, 50, "RIGHT")
+        row.name = RowText(row, 30, C.name.w - 34)
+        row.have = RowText(row, C.have.x, C.have.w - 4, "RIGHT")
+        -- the Keep box (or the tick) against the right of its column, under the label
+        local keepR = C.stock.x + C.stock.w - 4
         row.keep = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
         row.keep:SetSize(38, 18)
-        row.keep:SetPoint("LEFT", 304, 0)
+        row.keep:SetPoint("LEFT", keepR - 38, 0)
         row.keep:SetAutoFocus(false)
         row.keep:SetNumeric(true)
         row.keep:SetMaxLetters(4)
         row.keep:SetJustifyH("CENTER")
-        local function setKeep(eb)
-            eb:ClearFocus()
-            if row.item then PC.Sell:SetStock(row.item.id, eb:GetText()) end
-        end
-        row.keep:SetScript("OnEnterPressed", setKeep)
+        -- the number goes to the item the box was for when you started typing (the rows can move)
+        row.keep:SetScript("OnEditFocusGained", function(eb) eb.editID = row.item and row.item.id end)
+        row.keep:SetScript("OnEnterPressed", function(eb) eb:ClearFocus() end)
         row.keep:SetScript("OnEditFocusLost", function(eb)
-            if row.item and (tonumber(eb:GetText()) or 0) ~= (row.item.stock or 0) then setKeep(eb) end
+            local id = eb.editID
+            eb.editID = nil
+            if id and (tonumber(eb:GetText()) or 0) ~= (PC.Sell:Stock()[id] or 0) then PC.Sell:SetStock(id, eb:GetText())
+            else UI:UpdateSell() end
         end)
         -- materials rows: a tick instead of the Keep box (ticked = sell it back, unticked = keep it)
         row.tick = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
         row.tick:SetSize(20, 20)
-        row.tick:SetPoint("LEFT", 313, 0)
+        row.tick:SetPoint("LEFT", keepR - 29, 0)
         row.tick:SetScript("OnClick", function(b)
             if row.mat then PC.VendorAuto:SetKeep(row.mat.id, not b:GetChecked()); UI:UpdateSell() end
         end)
@@ -834,9 +880,7 @@ function UI:CreateSellPage(p)
         end)
         row.tick:SetScript("OnLeave", function() GameTooltip:Hide() end)
         row.tick:Hide()
-        row.price = RowText(row, 346, 100, "RIGHT")
-        row.deposit = RowText(row, 446, 96, "RIGHT")
-        row.profit = RowText(row, 542, 100, "RIGHT")
+        for _, k in ipairs({ "price", "deposit", "ahProfit", "vProfit" }) do row[k] = RowText(row, C[k].x, C[k].w - 4, "RIGHT") end
         row.post = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         row.post:SetSize(90, 18)
         row.post:SetPoint("RIGHT", -6, 0)
@@ -860,9 +904,14 @@ function UI:CreateSellPage(p)
                 tip[#tip + 1] = "|cff888888Picked by profit after the deposit, from how fast it sells and how many are listed.|r"
             end
             if it.cost then tip[#tip + 1] = "Cost you: " .. PC:Money(it.cost) .. " each (lowest you'd sell at: " .. PC:Money(it.floor or 0) .. ")" end
-            if it.tooCheap then tip[#tip + 1] = "|cffff8040It sells for under 1s on the AH: not worth posting.|r"
-            elseif it.hold then tip[#tip + 1] = "|cffff8040The AH is below your cost right now: holding it.|r" end
-            tip[#tip + 1] = "|cff888888Shift-click: search the AH   Alt-click: price alert|r"
+            if it.have > 0 then
+                local ah, v = UI:SellProfits(it)
+                tip[#tip + 1] = ("All %d: Auction Profit %s, Vendor Profit %s"):format(it.have, PC:Money(ah, true), PC:Money(v, true))
+            end
+            if it.vendor then tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. It pays more than the Auction House after its cut and deposit.|r" end
+            if it.tooCheap then tip[#tip + 1] = "|cffff8040It sells for under 1s at auction: not worth posting.|r"
+            elseif it.hold then tip[#tip + 1] = "|cffff8040Auction prices are below your cost right now: holding it.|r" end
+            tip[#tip + 1] = "|cff888888Shift-click: search the Auction House   Alt-click: price alert|r"
             ShowTooltip(r, tip, it.id)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -874,8 +923,8 @@ function UI:CreateSellPage(p)
     self.sellEmpty = lp:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     self.sellEmpty:SetPoint("CENTER", 0, -10)
     self.sellEmpty:SetWidth(600)
-    local by = -96 - (28 + SELL_ROWS * ROW_H + 10) - 8
-    self.sellSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, 430))
+    local by = -96 - SELL_H - 8
+    self.sellSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, PW - 320))
     self.sellSummary:SetWordWrap(false)
     -- Purge: sell every crafted item to clear bag space, even below cost
     local purge = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
@@ -887,7 +936,7 @@ function UI:CreateSellPage(p)
         UI:UpdateSell()
     end)
     purge:SetScript("OnEnter", function(b)
-        ShowTooltip(b, { "Purge crafted items", "Clears bag space: sells every crafted item in your bags, each wherever it brings in more gold (AH or vendor), even below what it cost. Turns itself off when they're gone." })
+        ShowTooltip(b, { "Purge crafted items", "Clears bag space: sells every crafted item in your bags, each wherever it brings in more gold (auction or vendor), even below what it cost. Turns itself off when they're gone." })
     end)
     purge:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.sellPurge = purge
@@ -912,18 +961,64 @@ function UI:UpdateSell()
     if self.sellPurge then self.sellPurge:SetText(PC.Sell.purge and "Stop purging" or "Purge crafted items") end
     if self.sellPurgeMats then self.sellPurgeMats:SetText(PC.Sell.purgeMats and "Stop purging" or "Purge materials") end
     local items = PC.Sell:Items()
-    local total, n = 0, 0
+    -- the totals of what's ready to sell, each way
+    local ahT, vT, nAH, nV, n = 0, 0, 0, 0, 0
+    local profits = {}
     for _, it in ipairs(items) do
-        if it.have > 0 and it.profit and not it.hold then total = total + it.profit; n = n + 1 end
+        local ah, v = self:SellProfits(it)
+        profits[it] = { ah, v }
+        if it.have > 0 and not it.hold then
+            n = n + 1
+            if ah then ahT, nAH = ahT + ah, nAH + 1 end
+            if v then vT, nV = vT + v, nV + 1 end
+        end
     end
-    -- below the crafted items: materials that can go back to a vendor (bags and bank), tick to sell
+    -- below the crafted items: materials that can go back to a vendor (bags and bank), tick to sell.
+    -- Each part sorted by the column you picked (Sell:Items comes in its own order: copied first).
     local mats = PC.VendorAuto and PC.VendorAuto:SellBackList() or {}
-    local rows = {}
-    for _, it in ipairs(items) do rows[#rows + 1] = { item = it } end
-    if #mats > 0 then
-        rows[#rows + 1] = { header = true }
-        for _, m in ipairs(mats) do rows[#rows + 1] = { mat = m } end
+    local list, mlist = {}, {}
+    for i, it in ipairs(items) do list[i] = { item = it } end
+    for i, m in ipairs(mats) do mlist[i] = { mat = m } end
+    local s = self:SortState("sell")
+    local function name(r) return ((r.item or r.mat).name or ""):lower() end
+    local function val(r, k)
+        if k == "name" then return name(r) end
+        local it, m = r.item, r.mat
+        if m then
+            local count = (m.bags or 0) + (m.bank or 0)
+            if k == "have" then return count end
+            if k == "price" then return m.each end
+            if k == "vProfit" then return (not m.keep) and m.each and m.each * count or nil end
+            return nil
+        end
+        if k == "ahProfit" then return profits[it][1] end
+        if k == "vProfit" then return profits[it][2] end
+        if k == "price" then return (not it.tooCheap and not it.hold) and it.price or nil end
+        if k == "deposit" then return (it.duration and it.have > 0 and not it.hold) and it.deposit or nil end
+        return it[k] -- have, stock
     end
+    local function key(r) return r.item and r.item.id or ("m" .. tostring(r.mat.id)) end
+    local editing = false
+    for _, row in ipairs(self.sellRows) do if row.keep:HasFocus() then editing = true end end
+    if editing and self.sellOrder then
+        -- typing in a Keep box: the rows stay where they are until you're done
+        local pos = self.sellOrder
+        local function byPos(a, b) return (pos[key(a)] or 1e9) < (pos[key(b)] or 1e9) end
+        table.sort(list, byPos)
+        table.sort(mlist, byPos)
+    else
+        UI.SortRows(list, s.key, s.dir, val, name)
+        UI.SortRows(mlist, s.key, s.dir, val, name)
+    end
+    self:PaintHeaders(self.sellHeaders, "sell")
+    local rows = list
+    if #mlist > 0 then
+        rows[#rows + 1] = { header = true }
+        for _, r in ipairs(mlist) do rows[#rows + 1] = r end
+    end
+    self.sellOrder = {}
+    for i, r in ipairs(rows) do if not r.header then self.sellOrder[key(r)] = i end end
+    self.sellData = rows
     self.sellOffset = math.min(math.max(self.sellOffset or 0, 0), math.max(#rows - SELL_ROWS, 0))
     for i, row in ipairs(self.sellRows) do
         local r = rows[i + self.sellOffset]
@@ -934,7 +1029,8 @@ function UI:UpdateSell()
         if r and r.header then
             row.icon:SetTexture(nil)
             row.name:SetText("|cffd8b060Extra materials to sell back|r |cff888888(untick to keep)|r")
-            row.have:SetText(""); row.price:SetText(""); row.deposit:SetText(""); row.profit:SetText("")
+            row.icon:SetDesaturated(false)
+            row.have:SetText(""); row.price:SetText(""); row.deposit:SetText(""); row.ahProfit:SetText(""); row.vProfit:SetText("")
             row.post:Hide()
             row:Show()
         elseif r and r.mat then
@@ -947,7 +1043,8 @@ function UI:UpdateSell()
             row.tick:SetChecked(not m.keep)
             row.price:SetText(PC:Money(m.each, false, "silver"))
             row.deposit:SetText("|cff888888vendor|r")
-            row.profit:SetText(m.keep and "|cff888888kept|r" or PC:Money(m.each * (m.bags + m.bank), true, true))
+            row.ahProfit:SetText("")
+            row.vProfit:SetText(m.keep and "|cff888888kept|r" or PC:Money(m.each * (m.bags + m.bank), true))
             row.post:Hide()
             row:Show()
         elseif it then
@@ -970,12 +1067,13 @@ function UI:UpdateSell()
             else
                 row.deposit:SetText("")
             end
-            if it.hold then
-                row.profit:SetText("|cff888888hold|r")
-            elseif it.profit and it.have > 0 then
-                row.profit:SetText(PC:Money(it.profit, true, true))
+            -- (none in your bags: nothing to sell yet; held: the AH is below your cost)
+            local pr = profits[it]
+            if it.have == 0 then
+                row.ahProfit:SetText(""); row.vProfit:SetText("")
             else
-                row.profit:SetText("")
+                row.ahProfit:SetText(it.hold and not it.vendor and "|cff888888hold|r" or PC:Money(pr[1], true))
+                row.vProfit:SetText((it.vendor and pr[2] and pr[2] > 0) and ("|cff40c0ff" .. PC:Money(pr[2]) .. "|r") or PC:Money(pr[2], true))
             end
             local b = row.post
             if it.have == 0 then
@@ -1000,10 +1098,12 @@ function UI:UpdateSell()
     self.sellEmpty:SetText(#rows == 0 and "Nothing from your plan to sell yet.\nCraft something from your plan and it shows up here, ready to post." or "")
     if #items == 0 then
         self.sellSummary:SetText("")
-    elseif PC.ahOpen then
-        self.sellSummary:SetText(("%d ready to post  ·  about %s profit"):format(n, PC:Money(total, true, true)))
     else
-        self.sellSummary:SetText(("%d ready to post  ·  about %s profit  ·  |cffff8040open the Auction House to post|r"):format(n, PC:Money(total, true, true)))
+        local ah, v = nAH > 0 and ahT or nil, nV > 0 and vT or nil
+        local both = PC.Sell.ProfitText and PC.Sell:ProfitText(ah, v)
+            or ("Auction Profit %s · Vendor Profit %s"):format(PC:Money(ah, true), PC:Money(v, true))
+        self.sellSummary:SetText(("%d ready to sell  ·  %s %s(about)|r%s"):format(n, both, UI.DIM,
+            PC.ahOpen and "" or "  ·  |cffff8040open the Auction House to post|r"))
     end
 end
 
@@ -1016,8 +1116,10 @@ local SOURCE_COLORS = { Vendor = "ff9f40", Trainer = "d8b060", Drop = "40c040", 
 UI.LEARN_VIEWS = { { "now", "Get now at my level" }, { "soon", "Soon" }, { "all", "All" } }
 local LEARN_SOURCES = { "All", "Vendor", "Trainer", "Drop", "Quest", "Dungeon", "Reputation", "Special currency", "Other" }
 
+local LEARN_H = -LIST_Y + LEARN_ROWS * ROW_H + 10
+
 function UI:CreateLearnPage(p)
-    local intro = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -62, 750))
+    local intro = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -62, PW - 8))
     intro:SetText("Recipes, patterns and plans you don't know yet, and where to get them. " .. UI.DIM ..
         "Greyed: within 10 levels (or a little more skill). Go sends your Task Button there by the quickest way.|r")
     -- filters
@@ -1118,25 +1220,43 @@ function UI:CreateLearnPage(p)
     prof:SetSize(22, 22)
     prof:SetPoint("TOPLEFT", 454, -84)
     prof:SetScript("OnClick", function(b) UI.learnProfitOnly = b:GetChecked() and true or false; UI:UpdateLearn() end)
+    prof:SetScript("OnEnter", function(b) ShowTooltip(b, { "Only Auction profit", "Only recipes making at least the minimum Auction Profit (Settings). With Vendor profit ticked too, a recipe must meet both." }) end)
+    prof:SetScript("OnLeave", function() GameTooltip:Hide() end)
     local pl = UI.Ink(prof:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"))
     pl:SetPoint("LEFT", prof, "RIGHT", 2, 0)
-    pl:SetText("Only ones that make a profit")
-    self.learnProfitBox = prof
+    pl:SetText(("Only %d%%+ Auction profit"):format(PC:MinProfitPct()))
+    self.learnProfitBox, self.learnProfitLabel = prof, pl
+    local vbox = CreateFrame("CheckButton", nil, p, "UICheckButtonTemplate")
+    vbox:SetSize(22, 22)
+    vbox:SetPoint("LEFT", pl, "RIGHT", 10, 0)
+    vbox:SetScript("OnClick", function(b) UI.learnVProfitOnly = b:GetChecked() and true or false; UI:UpdateLearn() end)
+    vbox:SetScript("OnEnter", function(b) ShowTooltip(b, { "Only Vendor profit", "Only recipes making at least the minimum Vendor Profit, selling to a vendor (Settings). With Auction profit ticked too, a recipe must meet both." }) end)
+    vbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local vl = UI.Ink(vbox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"))
+    vl:SetPoint("LEFT", vbox, "RIGHT", 2, 0)
+    vl:SetText(("Only %d%%+ Vendor profit"):format(PC:MinProfitPct()))
+    self.learnVProfitBox, self.learnVProfitLabel = vbox, vl
 
-    local lp = Panel(p, 12, -112, 756, 28 + LEARN_ROWS * ROW_H + 10)
-    HeaderStrip(lp, 748)
-    HeaderButton(lp, 4, 230, "Recipe")
-    HeaderButton(lp, 232, 46, "Skill", nil, "RIGHT")
-    HeaderButton(lp, 278, 40, "Lvl", nil, "RIGHT")
-    HeaderButton(lp, 320, 74, "Source")
-    HeaderButton(lp, 394, 128, "Where")
-    HeaderButton(lp, 522, 66, "Cost", nil, "RIGHT")
-    HeaderButton(lp, 588, 70, "Profit", nil, "RIGHT")
+    local lp = Panel(p, 12, -112, PW, LEARN_H)
+    HeaderStrip(lp)
+    local cols = {
+        { "name", "Recipe", nil, "Recipes, patterns and plans you don't know yet.", text = true },
+        { "skill", "Skill", 50, "The skill it needs." },
+        { "level", "Lvl", 44, "The level it needs." },
+        { "source", "Source", 84, "Where it comes from: vendor, trainer, drop, quest...", text = true },
+        { "where", "Where", 170, "Who sells or teaches it, or where it drops (and the zone).", text = true },
+        { "cost", "Cost", 90, "What it costs to get." },
+        { "ahProfit", "Auction Profit", 90, "Auction Profit per craft once learnt, after the 5% auction cut. ~ = uses an auction price over 6 hours old. ? = no known source or cost yet." },
+        { "vendorProfit", "Vendor Profit", 90, "Vendor Profit per craft once learnt, selling to a vendor. ~ = a material's auction price is over 6 hours old." },
+        { nil, nil, 84 }, -- Go and +
+    }
+    self.learnHeaders = Columns(lp, cols, "learn")
+    local C = cols.by
     self.learnRows = {}
     for i = 1, LEARN_ROWS do
         local row = CreateFrame("Button", nil, lp)
-        row:SetSize(748, ROW_H)
-        row:SetPoint("TOPLEFT", 4, -28 - (i - 1) * ROW_H)
+        row:SetSize(RW, ROW_H)
+        row:SetPoint("TOPLEFT", 4, LIST_Y - (i - 1) * ROW_H)
         Stripe(row, i)
         local hl = row:CreateTexture(nil, "HIGHLIGHT")
         hl:SetAllPoints()
@@ -1144,13 +1264,10 @@ function UI:CreateLearnPage(p)
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
-        row.name = RowText(row, 30, 200)
-        row.skill = RowText(row, 228, 46, "RIGHT")
-        row.level = RowText(row, 274, 40, "RIGHT")
-        row.source = RowText(row, 322, 72)
-        row.where = RowText(row, 396, 122)
-        row.cost = RowText(row, 518, 66, "RIGHT")
-        row.profit = RowText(row, 584, 70, "RIGHT")
+        row.name = RowText(row, 30, C.name.w - 34)
+        for _, k in ipairs({ "skill", "level", "source", "where", "cost", "ahProfit", "vendorProfit" }) do
+            row[k] = RowText(row, C[k].x, C[k].w - 4, "RIGHT")
+        end
         row.go = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         row.go:SetSize(44, 18)
         row.go:SetPoint("RIGHT", -32, 0)
@@ -1185,9 +1302,24 @@ function UI:CreateLearnPage(p)
                 if e.cost then tip[#tip + 1] = "And " .. PC:Money(e.cost) end
             elseif e.cost then tip[#tip + 1] = "Costs " .. PC:Money(e.cost) elseif e.costText then tip[#tip + 1] = "Costs " .. e.costText end
             if e.event then tip[#tip + 1] = "|cffffd100Holiday recipe:|r " .. e.event end
-            if e.profit then
-                tip[#tip + 1] = ("Profit per craft: %s"):format(PC:Money(e.profit, true, true))
-                if e.cost and e.profit > 0 then tip[#tip + 1] = ("Pays for itself after about %d crafts."):format(math.ceil(e.cost / e.profit)) end
+            if e.reagents and #e.reagents > 0 then
+                for _, l in ipairs(UI:IngredientLines({ reagents = e.reagents }, "low")) do tip[#tip + 1] = l end
+                tip[#tip + 1] = " "
+            end
+            if e.profit or e.ahProfit or e.vendorProfit then
+                local out, made = e.output, math.max(e.qty or 1, 1)
+                local vPays, ahEach = out and PC:SellPrice(out), out and PC:Prices()[out]
+                local name = (out and PC:ItemName(out)) or "What it makes"
+                tip[#tip + 1] = ("%s%s: a vendor pays you %s each, at auction %s each"):format(name, made ~= 1 and (" (x%s a craft)"):format(made) or "",
+                    (vPays and vPays > 0) and PC:Money(vPays) or "nothing", ahEach and PC:Money(ahEach) or "no price yet")
+                if e.itemID and e.itemID ~= out then
+                    tip[#tip + 1] = "|cff888888(The Sell Price above is what a vendor pays for the recipe itself.)|r"
+                end
+                tip[#tip + 1] = ("Per craft: Auction Profit %s, Vendor Profit %s"):format(PC:Money(e.ahProfit, true), PC:Money(e.vendorProfit, true))
+                if e.ahAge then
+                    tip[#tip + 1] = ("|cffffd100~ Uses an auction price from %s ago. The next scan refreshes it.|r"):format(PC:Ago(e.ahAge))
+                end
+                if e.cost and e.profit and e.profit > 0 then tip[#tip + 1] = ("Pays for itself after about %d crafts."):format(math.ceil(e.cost / e.profit)) end
             end
             if e.why then tip[#tip + 1] = "|cff888888Not yet: " .. e.why .. "|r" end
             if e.cantAfford then
@@ -1210,12 +1342,12 @@ function UI:CreateLearnPage(p)
     self.learnEmpty = lp:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     self.learnEmpty:SetPoint("CENTER", 0, -10)
     self.learnEmpty:SetWidth(620)
-    local by = -112 - (28 + LEARN_ROWS * ROW_H + 10) - 8
-    self.learnSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, 470))
+    local by = -112 - LEARN_H - 8
+    self.learnSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, PW - 280))
     self.learnSummary:SetWordWrap(false)
     local clear = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
     clear:SetSize(90, 22)
-    clear:SetPoint("TOPRIGHT", p, "TOPLEFT", 768, by)
+    clear:SetPoint("TOPRIGHT", p, "TOPLEFT", 12 + PW, by)
     clear:SetText("Clear trip")
     clear:SetScript("OnClick", function() PC.ToLearn:ClearTrip() end)
     self.learnClear = clear
@@ -1267,6 +1399,11 @@ function UI:UpdateLearn()
     self.learnTrip:SetShown(stops > 0)
     self.learnTrip:SetText(view == "trip" and "Back to recipes" or ("Start my trip (%d)"):format(stops))
     self.learnProfitBox:SetChecked(self.learnProfitOnly and true or false)
+    self.learnProfitLabel:SetText(("Only %d%%+ Auction profit"):format(PC:MinProfitPct())) -- (follows the setting)
+    self.learnVProfitBox:SetChecked(self.learnVProfitOnly and true or false)
+    self.learnVProfitLabel:SetText(("Only %d%%+ Vendor profit"):format(PC:MinProfitPct()))
+    local minPct = PC:MinProfitPct()
+    local function pctOK(p, mats) return p and p > 0 and (not mats or mats <= 0 or p / mats * 100 >= minPct) end
     local all = PC.ToLearn:List()
     local list, nNow, nSoon = {}, 0, 0
     -- each trip stop's place in the order
@@ -1288,10 +1425,21 @@ function UI:UpdateLearn()
         local waiting = special and (e.status == "currency" or e.repShort)
         local ok = e and (profF == "All" or e.prof == profF or (profF == "Mining" and e.prof == "Smelting"))
             and (srcF == "All" or special or (srcF ~= "Special currency" and e.source == srcF) or (srcF == "Other" and not SOURCE_COLORS[e.source or ""]))
-            and (not self.learnProfitOnly or (e.profit and e.profit > 0))
+            and (not self.learnProfitOnly or pctOK(e.ahProfit, e.matsCost))
+            and (not self.learnVProfitOnly or pctOK(e.vendorProfit, e.matsCost))
             and (view == "all" or waiting or (view == "now" and e.status == "now") or (view == "soon" and (e.status == "now" or e.status == "soon")))
         if e and ok then list[#list + 1] = e end
     end
+    -- sorted by the column you picked (until then: get-now first, best profit first; the trip: in its order)
+    local s = self:SortState("learn")
+    local function lower(v) return v and tostring(v):lower() or nil end
+    UI.SortRows(list, s.key, s.dir, function(e, k)
+        if k == "name" or k == "source" then return lower(e[k]) end
+        if k == "where" then return lower(e.where and (e.where .. " " .. (e.zone or ""))) end
+        return tonumber(e[k]) -- skill, level, cost, ahProfit, vendorProfit
+    end, function(e) return lower(e.name) or "" end)
+    self:PaintHeaders(self.learnHeaders, "learn")
+    self.learnData = list
     self.learnOffset = math.min(math.max(self.learnOffset or 0, 0), math.max(#list - LEARN_ROWS, 0))
     for i, row in ipairs(self.learnRows) do
         local e = list[i + self.learnOffset]
@@ -1316,7 +1464,8 @@ function UI:UpdateLearn()
             end
             row.cost:SetText(cur or (e.cost and ((e.cantAfford and "|cffff5555" or "") .. PC:Money(e.cost, false, true) .. (e.cantAfford and "|r" or "")))
                 or (e.costText and ("|cff888888" .. e.costText .. "|r")) or "|cff666666?|r")
-            row.profit:SetText(e.profit and PC:Money(e.profit, true, true) or "|cff666666?|r")
+            row.ahProfit:SetText(e.noSource and "|cff666666?|r" or ((e.ahAge and "|cffffd100~|r" or "") .. PC:Money(e.ahProfit, true)))
+            row.vendorProfit:SetText(e.noSource and "|cff666666?|r" or ((e.vAge and "|cffffd100~|r" or "") .. PC:Money(e.vendorProfit, true)))
             -- "soon" ones can go on the trip too (you choose them; they wait in the bank until you can learn them)
             local canTrip = (e.status ~= "later" or stopNo[e.key] ~= nil) and not e.seasonOff
             row.go:SetShown(canTrip)
@@ -1333,7 +1482,8 @@ function UI:UpdateLearn()
         or "Nothing matches these filters.") or "")
     self.learnSummary:SetText(("%d you can get now  ·  %d soon%s"):format(nNow, nSoon,
         #trip > 0 and ("  ·  |cffffd100Trip: %d stop%s|r%s"):format(#trip, #trip == 1 and "" or "s",
-            view == "trip" and " in the order you'll visit them" or " (Trip shows the order)") or ""))
+            view ~= "trip" and " (Trip shows the order)" or s.key and " (the numbers are the order you'll visit them)"
+            or " in the order you'll visit them") or ""))
     self.learnStart:Hide()
     self.learnClear:SetShown(#trip > 0)
 end
@@ -1343,36 +1493,12 @@ end
 ---------------------------------------------------------------------------
 local HISTORY_ROWS = 12
 local HISTORY_KINDS = {
-    { "ALL", "All" }, { "buy", "Bought" }, { "sell", "Sold on AH" }, { "vendor", "Sold to vendor" }, { "fee", "AH fees" },
+    { "ALL", "All" }, { "buy", "Bought" }, { "sell", "Sold at auction" }, { "vendor", "Sold to vendor" }, { "fee", "Auction fees" },
 }
 local KIND_LABEL = {
-    buy = "|cffff5555Bought (AH)|r", sell = "|cff40ff40Sold (AH)|r", vendor = "|cff40c0ffSold (vendor)|r", fee = "|cffff8040AH fee|r",
+    buy = "|cffff5555Bought (auction)|r", sell = "|cff40ff40Sold (auction)|r", vendor = "|cff40c0ffSold (vendor)|r", fee = "|cffff8040AH fee|r",
 }
-UI.historyKind, UI.historySort, UI.historyDir, UI.historyOffset = "ALL", "t", -1, 0
-
-local function HistoryHeader(parent, x, w, label, key, justify)
-    local b = CreateFrame("Button", nil, parent)
-    b:SetPoint("TOPLEFT", x, -4)
-    b:SetSize(w, 21)
-    b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    if justify == "RIGHT" then b.text:SetPoint("RIGHT", -6, 0) else b.text:SetPoint("LEFT", 6, 0) end
-    b.text:SetText(label)
-    b.label, b.key = label, key
-    local hl = b:CreateTexture(nil, "HIGHLIGHT")
-    hl:SetAllPoints()
-    hl:SetColorTexture(1, 1, 1, 0.08)
-    b:SetScript("OnClick", function()
-        if UI.historySort == key then
-            UI.historyDir = -UI.historyDir
-        else
-            UI.historySort = key
-            UI.historyDir = (key == "item" or key == "kind") and 1 or -1
-        end
-        UI.historyOffset = 0
-        UI:Refresh()
-    end)
-    return b
-end
+UI.historyKind, UI.historyOffset = "ALL", 0
 
 function UI:CreateHistoryPage(p)
     -- Type filter buttons
@@ -1389,25 +1515,27 @@ function UI:CreateHistoryPage(p)
         b:SetScript("OnClick", function(btn)
             UI.historyKind = btn.kind
             UI.historyOffset = 0
-            UI:Refresh()
+            UI:Redraw()
         end)
         self.historyButtons[i] = b
     end
 
-    local lp = Panel(p, 12, -88, 696, 384)
-    HeaderStrip(lp, 688)
-    self.historyHeaders = {
-        HistoryHeader(lp, 4, 104, "Date", "t"),
-        HistoryHeader(lp, 108, 112, "Type", "kind"),
-        HistoryHeader(lp, 220, 250, "Item", "item"),
-        HistoryHeader(lp, 470, 50, "Qty", "qty", "RIGHT"),
-        HistoryHeader(lp, 520, 76, "Each", "each", "RIGHT"),
-        HistoryHeader(lp, 596, 96, "Amount", "signed", "RIGHT"),
+    local lp = Panel(p, 12, -88, PW, 384)
+    HeaderStrip(lp)
+    local cols = {
+        { "t", "Date", 110, "When it happened." },
+        { "kind", "Type", 130, "Bought at auction, sold at auction, sold to a vendor, or an auction fee.", text = true },
+        { "item", "Item", nil, "What was bought or sold.", text = true },
+        { "qty", "Qty", 60, "How many." },
+        { "each", "Each", 120, "The price of one." },
+        { "signed", "Amount", 130, "Gold in (green) or out (red)." },
     }
+    self.historyHeaders = Columns(lp, cols, "history")
+    local C = cols.by
 
     local list = CreateFrame("Frame", nil, lp)
-    list:SetPoint("TOPLEFT", 4, -28)
-    list:SetSize(688, HISTORY_ROWS * ROW_H)
+    list:SetPoint("TOPLEFT", 4, LIST_Y)
+    list:SetSize(RW, HISTORY_ROWS * ROW_H)
     list:EnableMouseWheel(true)
     list:SetScript("OnMouseWheel", function(_, delta)
         UI.historyOffset = UI.historyOffset - delta * 3
@@ -1421,18 +1549,18 @@ function UI:CreateHistoryPage(p)
     self.historyRows = {}
     for i = 1, HISTORY_ROWS do
         local row = CreateFrame("Button", nil, list)
-        row:SetSize(688, ROW_H)
+        row:SetSize(RW, ROW_H)
         row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
         Stripe(row, i)
         local hl = row:CreateTexture(nil, "HIGHLIGHT")
         hl:SetAllPoints()
         hl:SetColorTexture(unpack(T.rowHover))
-        row.when = RowText(row, 6, 100)
-        row.kind = RowText(row, 110, 110)
-        row.item = RowText(row, 220, 246)
-        row.qty = RowText(row, 466, 50, "RIGHT")
-        row.each = RowText(row, 516, 76, "RIGHT")
-        row.amount = RowText(row, 592, 92, "RIGHT")
+        row.when = RowText(row, C.t.x, C.t.w - 4, "RIGHT")
+        row.kind = RowText(row, C.kind.x, C.kind.w - 4, "RIGHT")
+        row.item = RowText(row, C.item.x + 8, C.item.w - 12)
+        row.qty = RowText(row, C.qty.x, C.qty.w - 4, "RIGHT")
+        row.each = RowText(row, C.each.x, C.each.w - 4, "RIGHT")
+        row.amount = RowText(row, C.signed.x, C.signed.w - 4, "RIGHT")
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         row:SetScript("OnClick", function(btn, button)
             local e = btn.entry
@@ -1451,7 +1579,7 @@ function UI:CreateHistoryPage(p)
             if not e then return end
             local tip = { e.item or "Unknown item", date("%m/%d/%Y %H:%M", e.t), KIND_LABEL[e.kind] or e.kind }
             if e.qty and e.qty > 1 then tip[#tip + 1] = ("%d for %s (%s each)"):format(e.qty, PC:Money(e.amount), PC:Money(e.each)) end
-            if e.kind == "sell" then tip[#tip + 1] = "|cff888888Gold you got from the mail, after the AH's 5% cut.|r" end
+            if e.kind == "sell" then tip[#tip + 1] = "|cff888888Gold you got from the mail, after the 5% auction cut.|r" end
             tip[#tip + 1] = CLICK_HINT
             ShowTooltip(btn, tip)
         end)
@@ -1459,7 +1587,7 @@ function UI:CreateHistoryPage(p)
         self.historyRows[i] = row
     end
 
-    self.historyTotals = StatStrip(lp, 10, -362, 676, { "Entries", "Bought", "Sold on AH", "Vendor", "Fees", "Net" })
+    self.historyTotals = StatStrip(lp, 10, LIST_Y - HISTORY_ROWS * ROW_H - 8, RW - 12, { "Entries", "Bought", "Sold at auction", "Vendor", "Fees", "Net" })
 end
 
 function UI:UpdateHistory()
@@ -1488,25 +1616,14 @@ function UI:UpdateHistory()
         end
     end
 
-    -- Sort
-    local key, dir = self.historySort, self.historyDir
-    table.sort(data, function(a, b)
-        local x, y = a[key], b[key]
-        if x == y then return a.t > b.t end
-        if dir > 0 then return x < y else return x > y end
-    end)
+    -- Sort (newest first to start with)
+    local s = self:SortState("history")
+    UI.SortRows(data, s.key, s.dir, function(e, k)
+        if k == "item" then return e.item:lower() end
+        return e[k]
+    end, function(e) return e.item:lower() end)
     self.historyData = data
-
-    local media = "Interface\\AddOns\\" .. ADDON .. "\\Media\\"
-    for _, h in ipairs(self.historyHeaders) do
-        if h.key == key then
-            h.text:SetText(h.label .. " |T" .. media .. (dir > 0 and "SortUp" or "SortDown") .. ":12:12:0:0|t")
-            h.text:SetTextColor(1, 1, 1)
-        else
-            h.text:SetText(h.label)
-            h.text:SetTextColor(1, 0.82, 0)
-        end
-    end
+    self:PaintHeaders(self.historyHeaders, "history")
 
     local net = sold + vendor - bought - fees
     local function M(v, color) return { PC:Money(v, color, true), PC:Money(v, color) } end

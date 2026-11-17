@@ -15,6 +15,16 @@ local GetMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 function PC.IsSecret(v)
     return v ~= nil and issecretvalue ~= nil and issecretvalue(v) and true or false
 end
+-- Text in another alphabet than this game client's (Cyrillic on an English client, Chinese or Korean
+-- on a Russian one...): names and zones other players' clients sent in their own language
+local CLIENT_LOCALE = GetLocale and GetLocale() or "enUS"
+function PC.Foreign(s)
+    if type(s) ~= "string" or s == "" or PC.IsSecret(s) then return false end
+    if CLIENT_LOCALE ~= "ruRU" and s:find("[\208-\211][\128-\191]") then return true end
+    if CLIENT_LOCALE ~= "koKR" and CLIENT_LOCALE ~= "zhCN" and CLIENT_LOCALE ~= "zhTW"
+        and s:find("[\227-\237][\128-\191][\128-\191]") then return true end
+    return false
+end
 -- a plain number, or nil when the game is keeping it secret right now
 function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
@@ -31,9 +41,12 @@ PC.VERSION = (PC.BUILD ~= "dev" and PC.BUILD) or PC.TOC_VERSION -- the version o
 PC.NAME = (GetMeta and GetMeta(ADDON, "Title")) or "ProfitCrafter"   -- "ProfitCrafter" or "ProfitCrafter Forever"
 
 PC.AH_CUT = 0.05             -- Auction House takes 5% of the sale
+PC.MIN_PROFIT_DEFAULT = 10   -- percent of the materials cost a craft must make (Settings)
+PC.MAX_CRAFTABLE = 9999      -- most crafts the Craftable column counts up to (a plan holds at most 9999)
 PC.SCAN_COOLDOWN = 15 * 60   -- Blizzard allows one full AH scan every 15 minutes
 PC.MAX_AFFORD_CHECK = 200    -- most crafts we'll check when working out what you can afford
-PC.QUICK_BATCH = 25          -- items per Auction House search in the normal scan
+PC.QUICK_BATCH = 100         -- items per Auction House search in the normal scan (the most the game takes)
+PC.HOT_TIER = 1e12           -- (a best bet's score: hot sellers ahead of everything else)
 
 local BASIC_REAGENT = (Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic) or 1
 
@@ -133,7 +146,14 @@ local function InitDB()
     db.hideExp = db.hideExp or {}      -- [expansion id] = true: don't scan or show that expansion's recipes    -- [faction][itemID] = last time we saw one sell (kept for good, unlike supplyHist)
     db.lastScanStart = db.lastScanStart or 0
     if db.autoScan == nil then db.autoScan = true end
-    if db.onlyProfit == nil then db.onlyProfit = false end
+    if db.onlyProfit == nil then db.onlyProfit = true end
+    -- the minimum profit (percent of the materials cost): lists hide recipes under it and buying stops
+    -- before a craft would make less (Settings > Crafting and plans)
+    if type(db.minProfitPct) ~= "number" then db.minProfitPct = PC.MIN_PROFIT_DEFAULT end
+    -- the lists now hide recipes under the minimum profit: switched on once for everyone
+    if not db.minProfitFilter then db.onlyProfit, db.minProfitFilter = true, true end
+    -- recommendations (Best bets, Make me gold, Have materials) leave out AH crafts nobody bought today
+    if db.needSalesToday == nil then db.needSalesToday = true end
     db.uiStyle, db.reopenTab = nil, nil              -- old window-style setting (removed)
     if db.share == nil then db.share = true end     -- trade prices with guild/group automatically
     db.source = db.source or {}                     -- [faction][itemID] = who shared that price (nil = your own scan)
@@ -346,14 +366,19 @@ end
 -- plus the crafted items that don't stack over what's been used up. Counts only what you still
 -- need to get (what's in your bags is already taking its slots).
 function PC:PlanSlots(entries)
-    local slots = 0
+    local slots, tools = 0, 0
     local list = self:CombinedShoppingList(entries, 1)
     for _, it in ipairs(list) do
-        if it.buy and it.buy > 0 then slots = slots + math.ceil(it.buy / self:StackSize(it.id)) end
+        if it.buy and it.buy > 0 then
+            local n = math.ceil(it.buy / self:StackSize(it.id))
+            if it.tool then tools = tools + n else slots = slots + n end
+        end
     end
+    -- (materials fill the reagent bag first: the free slots compared against leave it out)
+    local inReagent = math.min(slots, self:FreeReagentBagSlots())
     -- crafted output: materials get used up as you craft, so most of its space is freed material slots;
     -- gear (stack 1) can still need more slots than its materials took
-    local made = 0
+    local made, credit = 0, 0
     -- skill-ups and vendor flips: what you make can go to a vendor (or be disenchanted) as you go,
     -- so it never limits the plan; only the materials need room
     local skill = self.UI and self.UI.IsSkillPlan and self.UI:IsSkillPlan()
@@ -370,9 +395,11 @@ function PC:PlanSlots(entries)
             if rid then matSlots = matSlots + math.ceil(rg.n * (e.planCount or 1) / self:StackSize(rid)) end
         end
         made = made + math.max(out - matSlots, 0)
+        credit = credit + math.min(out, matSlots)
         end
     end
-    return slots + made
+    -- (materials used up from the reagent bag free no room for what's made)
+    return slots - inReagent + tools + made + math.min(inReagent, credit)
 end
 
 -- Gold to plan with: your spending limit (bottom-left of the window) if you set one, never more than
@@ -428,6 +455,15 @@ function PC:PlanName()
         cdb.planCurrent = cur
     end
     return cur
+end
+
+-- "34 Seasoned Wolf Kabob (makes 102)": crafts, and what they make when a craft makes more than one
+function PC:CraftCount(n, r)
+    local q = r and r.qty or 1
+    local name = r and r.name or "?"
+    if not q or q == 1 then return ("%d %s"):format(n, name) end
+    local made = n * q
+    return ("%d %s (makes %s%d)"):format(n, name, made % 1 == 0 and "" or "about ", math.floor(made + 0.5))
 end
 
 function PC:CurrentPlan()
@@ -624,6 +660,13 @@ function PC:Checked()
     return db.checked[f]
 end
 
+-- How long ago an item's AH price was seen (seconds; nil: never). Older than OLD_PRICE: marked ~.
+PC.OLD_PRICE = 6 * 3600
+function PC:PriceAge(itemID)
+    local t = itemID and self:Checked()[itemID]
+    return t and math.max(time() - t, 0) or nil
+end
+
 function PC:Supply()
     local f = self:Faction()
     db.supply[f] = db.supply[f] or {}
@@ -709,7 +752,14 @@ end
 
 -- Counts what you have in your bags and bank
 -- What you own: bags, bank and reagent bank
-function PC:OwnedCount(itemID)
+-- Use what's in your bank (Settings, on by default). Off: the bank is left alone completely: nothing in
+-- it counts as yours (plans, profits, what to buy), and nothing is taken out of it or put in it.
+function PC:UseBank()
+    return not (db and db.useBank == false)
+end
+
+-- anyBank: count the bank even with the setting off (mail tracking must not jump when it's switched)
+function PC:OwnedCount(itemID, anyBank)
     local all, bags
     if C_Item and C_Item.GetItemCount then
         all = C_Item.GetItemCount(itemID, true, false, true) or 0
@@ -719,6 +769,7 @@ function PC:OwnedCount(itemID)
         bags = GetItemCount(itemID) or 0
     end
     all, bags = self.Num(all) or 0, self.Num(bags) or 0
+    if not anyBank and not self:UseBank() then return bags end -- (your bank is left out: bags only)
     -- away from the bank the game may only count your bags (it forgets the bank after a relog):
     -- what ProfitCrafter saw in your bank on the last visit counts too
     if not (self.Bank and self.Bank.Open and self.Bank:Open()) then
@@ -735,7 +786,7 @@ function PC:MailPending(itemID)
     local m = cdb and cdb.mailBought and cdb.mailBought[itemID]
     if not m then return 0 end
     if time() - (m.t or 0) > 2 * 86400 then cdb.mailBought[itemID] = nil return 0 end
-    local owned = self:OwnedCount(itemID)
+    local owned = self:OwnedCount(itemID, true)
     if owned < m.base then m.base = owned end -- used some up: arrivals count from here
     local left = m.q - (owned - m.base)
     if left <= 0 then cdb.mailBought[itemID] = nil return 0 end
@@ -776,7 +827,7 @@ end
 
 function PC:NoteMailBought(itemID, qty)
     local m = cdb.mailBought[itemID]
-    local owned = self:OwnedCount(itemID)
+    local owned = self:OwnedCount(itemID, true)
     if m then
         local left = self:MailPending(itemID)
         cdb.mailBought[itemID] = { q = left + qty, base = owned, t = time() }
@@ -785,9 +836,11 @@ function PC:NoteMailBought(itemID, qty)
     end
 end
 
--- What you have to craft with: bags, bank, reagent bank, plus purchases waiting in the mailbox
+-- What you have to craft with: bags, bank, reagent bank, plus purchases waiting in the mailbox, plus
+-- AH purchases sent but not answered yet (so a slow answer can never get the same thing bought twice)
 function PC:ItemCount(itemID)
-    return self:OwnedCount(itemID) + self:MailPending(itemID)
+    local flying = self.Buy and self.Buy.InFlight and self.Buy:InFlight(itemID) or 0
+    return self:OwnedCount(itemID) + self:MailPending(itemID) + flying
 end
 
 local pending = {}
@@ -1210,6 +1263,14 @@ PC.BARTER_MAX = 2
 function PC:BarterRank()
     if not self.FOREVER or not db then return 0 end
     if db.barterSet then return db.barterSet end
+    -- (asked for every vendor price: worked out once per refresh)
+    local memo = self._memo
+    if memo and memo.barter then return memo.barter end
+    local r = self:BarterRankRaw()
+    if memo then memo.barter = r end
+    return r
+end
+function PC:BarterRankRaw()
     -- a reputation discount (Honored) can make one vendor look cheaper, so the lowest recent
     -- reading across vendors is the one that's only the perk
     local best
@@ -1294,7 +1355,7 @@ function PC:CaptureVendor()
         local after = self:BarterRank()
         if after ~= before or (rank and not db.barterTold) then
             db.barterTold = true
-            Print(("Bartering: %d point%s, vendor prices %d%% off. Costs and profits use that."):format(after, after == 1 and "" or "s", after * 5))
+            Print(("Bartering: %d point%s, vendors charge you %d%% less."):format(after, after == 1 and "" or "s", after * 5))
         end
     end
     local m = self:BarterMult()
@@ -1340,8 +1401,8 @@ function PC:BeginScan(mode, auto)
             if self.ticker then self.ticker:Cancel() end
             self.ticker = nil
         elseif (self.scanMode == "quick" or self.scanMode == "depth") and GetTime() - (self.lastProgressAt or GetTime()) > self.SCAN_STALL then
-            self:EndScan(false, "The scan stopped getting answers from the Auction House. Prices found so far were kept; try Scan AH again.",
-                "Scan stopped: the AH stopped answering. Try again.")
+            self:EndScan(false, "The scan stopped getting answers from the Auction House. Prices found so far were kept; try Scan auctions again.",
+                "Scan stopped: the Auction House stopped answering. Try again.")
         end
         if self.UI then self.UI:UpdateBar() end
     end)
@@ -1410,6 +1471,21 @@ function PC:StartScan(auto)
             for _, id in ipairs(self:ReagentIDs(rg)) do add(id) end
         end
     end
+    -- and what the recipes you can learn now or soon (Scout recipes) make and use: else their AH Profit
+    -- went by whatever an old scan saw
+    local known, scout = #items, 0
+    if known > 0 and self.ToLearn then
+        local okL, list = pcall(self.ToLearn.List, self.ToLearn)
+        for _, e in ipairs(okL and list or {}) do
+            if (e.status == "now" or e.status == "soon") and e.output then
+                add(e.output)
+                for _, rg in ipairs(e.reagents or {}) do
+                    for _, id in ipairs(self:ReagentIDs(rg)) do add(id) end
+                end
+            end
+        end
+        scout = #items - known
+    end
     if #items == 0 and next(cdb.recipes) then
         Print("All your recipes are from expansions you turned off. Pick expansions in /pc config.")
         return
@@ -1423,7 +1499,8 @@ function PC:StartScan(auto)
     self.quick = { items = items, pos = 0, found = 0, missed = 0 }
     self:BeginScan("quick", auto)
     self.progress = 0
-    Print(("Scanning prices for %d items from your recipes..."):format(#items))
+    Print(("Scanning prices for %d items from your recipes%s..."):format(#items,
+        scout > 0 and (" (%d for recipes you can learn)"):format(scout) or ""))
     self:ScanStep(self.QuickNextBatch)
 end
 
@@ -1433,7 +1510,7 @@ function PC:QuickNextBatch()
     if q.pos >= #q.items then
         local missed = ""
         if q.missed > 0 then
-            missed = (" %d got no reply from the AH (shown as \"Not scanned\" in /pc items)."):format(q.missed)
+            missed = (" %d got no reply from the Auction House (shown as \"Not scanned\" in /pc items)."):format(q.missed)
         end
         return self:EndScan(true,
             ("Scan complete: %d of %d items are for sale.%s"):format(q.found, #q.items, missed),
@@ -1532,6 +1609,7 @@ function PC:QuickBatchDone(timedOut)
             self:Source()[id] = nil
             self:AddSupplyPoint(id, qty[id] or 0, now)
             self:AddHistory(id, got[id])
+            self:DepthScanned(id, got[id], qty[id])
             q.found = q.found + 1
         elseif timedOut then
             q.missed = q.missed + 1 -- no answer: keep the old price, don't mark as checked
@@ -1541,6 +1619,7 @@ function PC:QuickBatchDone(timedOut)
             checked[id] = now
             self:Source()[id] = nil
             self:AddSupplyPoint(id, 0, now)
+            self:DepthScanned(id, nil, 0)
         end
     end
     q.batch = nil
@@ -1565,7 +1644,7 @@ function PC:StartFullScan()
     if self.scanning then return end
     local wait = self:ScanWait()
     if wait > 0 then
-        Print(("Blizzard allows one full scan every 15 minutes. Try again in %d:%02d, or use the normal Scan AH button."):format(math.floor(wait / 60), wait % 60))
+        Print(("Blizzard allows one full scan every 15 minutes. Try again in %d:%02d, or use the normal Scan auctions button."):format(math.floor(wait / 60), wait % 60))
         return
     end
 
@@ -1644,6 +1723,7 @@ function PC:ProcessScan()
             for id, s in pairs(samples) do prices[id] = self:FullScanUnitPrice(s) end
             db.prices[self:Faction()] = prices
             db.supply[self:Faction()] = qty
+            for id in pairs(self:DepthTable()) do self:DepthScanned(id, prices[id], qty[id]) end
             db.source[self:Faction()] = {}  -- everything is now from your own scan
             local checked, now = self:Checked(), time()
             local function mark(id)
@@ -1752,6 +1832,7 @@ function PC:Record(kind, amount, item, qty)
     local L = cdb.ledger
     L[#L + 1] = { t = time(), kind = kind, amount = math.floor(amount + 0.5), item = item, qty = qty }
     while #L > self.MAX_LEDGER do table.remove(L, 1) end
+    self.ledgerVersion = (self.ledgerVersion or 0) + 1
     self:RefreshUI()
 end
 
@@ -2046,6 +2127,32 @@ function PC:NoteSold(itemID, t)
     if not ls[itemID] or t > ls[itemID] then ls[itemID] = t end
 end
 
+-- Your own AH sales by item name, from the Profit & loss ledger: [name] = { last = t, list = { {t, qty}, ... } }
+-- (oldest first). Built once and reused until the ledger changes: every recipe used to read the whole
+-- ledger twice per refresh, which got slower the longer you played.
+function PC:SellIndex()
+    local memo = self._memo
+    if memo and memo.sellIdx then return memo.sellIdx end
+    local L = cdb and cdb.ledger or {}
+    local first, last = L[1], L[#L]
+    local key = #L .. ":" .. tostring(first and first.t) .. ":" .. tostring(last and last.t) .. ":" .. tostring(last and last.qty)
+        .. ":" .. tostring(self.ledgerVersion or 0)
+    if self._sellIdxKey ~= key then
+        local idx = {}
+        for _, e in ipairs(L) do
+            if e.kind == "sell" and e.item and e.t then
+                local s = idx[e.item]
+                if not s then s = { last = e.t, list = {} }; idx[e.item] = s end
+                if e.t > s.last then s.last = e.t end
+                s.list[#s.list + 1] = { e.t, e.qty or 1 }
+            end
+        end
+        self._sellIdx, self._sellIdxKey = idx, key
+    end
+    if memo then memo.sellIdx = self._sellIdx end
+    return self._sellIdx
+end
+
 -- When this item last sold (seen dropping on the AH, or one of your own sales); nil = not known
 function PC:LastSold(itemID)
     if not itemID then return nil end
@@ -2058,11 +2165,8 @@ function PC:LastSold(itemID)
         end
     end
     local name = self:ItemName(itemID)
-    if name then
-        for _, e in ipairs(cdb.ledger) do
-            if e.kind == "sell" and e.item == name and (not best or e.t >= best) then best, mine = e.t, true end
-        end
-    end
+    local s = name and self:SellIndex()[name]
+    if s and (not best or s.last >= best) then best, mine = s.last, true end
     return best, mine
 end
 
@@ -2081,6 +2185,18 @@ end
 
 -- Estimated number sold in the last `seconds`, plus how much of that time we actually have data for
 function PC:SalesEstimate(itemID, seconds)
+    local memo = self._memo
+    if memo and itemID then
+        local key = "se" .. itemID .. ":" .. seconds
+        local hit = memo[key]
+        if hit then return hit[1], hit[2] end
+        local a, b = self:SalesEstimateRaw(itemID, seconds)
+        memo[key] = { a, b }
+        return a, b
+    end
+    return self:SalesEstimateRaw(itemID, seconds)
+end
+function PC:SalesEstimateRaw(itemID, seconds)
     local list = self:SupplyHistory()[itemID]
     if not list or #list < 2 then return nil end
     local since = time() - seconds
@@ -2105,16 +2221,19 @@ end
 -- Exactly how many you sold yourself (from your Profit & loss history)
 function PC:MySales(itemName, seconds)
     if not itemName then return 0 end
+    local s = self:SellIndex()[itemName]
+    if not s then return 0 end
     local since, n = time() - seconds, 0
-    for _, e in ipairs(cdb.ledger) do
-        if e.kind == "sell" and e.t >= since and e.item == itemName then n = n + (e.qty or 1) end
+    for i = #s.list, 1, -1 do
+        local e = s.list[i]
+        if e[1] >= since then n = n + e[2] end
     end
     return n
 end
 
 -- Tooltip lines for the sales info of an item
 function PC:SalesTooltip(itemID)
-    local lines = { "|cffffd100Sold on the AH (estimated):|r" }
+    local lines = { "|cffffd100Sold at auction (estimated):|r" }
     local any, partial = false, false
     for _, w in ipairs(self.SALES_WINDOWS) do
         local sold, covered = self:SalesEstimate(itemID, w[1])
@@ -2230,6 +2349,19 @@ function PC:SellPrice(itemID)
     -- what a vendor really paid you for it (learned at the vendor) beats everything
     local paid = db.vendorPaid and db.vendorPaid[itemID]
     if paid then return paid end
+    -- (the same item is asked about many times in one refresh: the game is asked once)
+    local memo = self._memo
+    if memo and itemID then
+        local key = "sp" .. itemID
+        local hit = memo[key]
+        if hit ~= nil then return hit or nil end
+        local v = self:SellPriceRaw(itemID)
+        memo[key] = v or false
+        return v
+    end
+    return self:SellPriceRaw(itemID)
+end
+function PC:SellPriceRaw(itemID)
     -- the game's own number, every time (a saved copy can be out of date after a patch: Minor Wizard
     -- Oil was remembered at 5s while the vendor pays 1s)
     local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
@@ -2248,17 +2380,18 @@ end
 function PC:ReportAlerts()
     local alerts = {}
 
-    -- Newly profitable recipes
+    -- Newly profitable recipes (clearing the minimum profit)
     local newly = {}
     for _, e in ipairs(self:Analyze()) do
-        if e.profit and e.profit > 0 and self.prevProfitable and not self.prevProfitable[e.id] then
+        if self:MeetsMin(e) and self.prevProfitable and not self.prevProfitable[e.id] then
             newly[#newly + 1] = e
         end
     end
     table.sort(newly, function(a, b) return a.profit > b.profit end)
     for i = 1, math.min(3, #newly) do
         local e = newly[i]
-        alerts[#alerts + 1] = ("|cff40ff40Now profitable:|r %s, %s per craft"):format(e.r.name, self:Money(e.profit))
+        alerts[#alerts + 1] = ("|cff40ff40Now profitable:|r %s (per craft: Auction Profit %s, Vendor Profit %s)"):format(e.r.name,
+            e.ahProfit and self:Money(e.ahProfit, true) or "n/a", e.vendorProfit and self:Money(e.vendorProfit, true) or "n/a")
     end
 
     -- Materials well below their usual price
@@ -2268,7 +2401,8 @@ function PC:ReportAlerts()
             for _, id in ipairs(self:ReagentIDs(rg)) do
                 if not seen[id] then
                     seen[id] = true
-                    local pct, avg = (not self:IsVendorItem(id)) and self:Trend(id) or nil
+                    local pct, avg -- (both of Trend's answers: an "and/or" kept only the first, so every tip said "usually n/a")
+                    if not self:IsVendorItem(id) then pct, avg = self:Trend(id) end
                     if pct and pct <= self.DEAL_PCT and self:Prices()[id] then
                         deals[#deals + 1] = { id = id, pct = pct, avg = avg }
                     end
@@ -2292,7 +2426,7 @@ end
 function PC:SnapshotProfitable()
     local set = {}
     for _, e in ipairs(self:Analyze()) do
-        if e.profit and e.profit > 0 then set[e.id] = true end
+        if self:MeetsMin(e) then set[e.id] = true end
     end
     self.prevProfitable = set
 end
@@ -2564,6 +2698,639 @@ function PC:UnitCost(itemID)
     return nil
 end
 
+---------------------------------------------------------------------------
+-- Buying a lot: the price ladder. The cheapest listing rarely has enough, so every amount is priced
+-- by walking the listings cheapest first (the live listings read after each scan; without them, the
+-- cheapest price for as many as are listed). Items a vendor also sells: only the listings under the
+-- vendor's price, then the vendor for the rest (it never runs out).
+--   ladder = { steps = { {p, q}, ... }, cq = running count, cc = running cost, vendor = price or nil,
+--              est = true when it's only the cheapest price (no live listings read) }
+---------------------------------------------------------------------------
+function PC:Ladder(itemID)
+    local memo = self._memo
+    local key = memo and ("lad" .. tostring(itemID))
+    if memo then
+        local hit = memo[key]
+        if hit ~= nil then return hit or nil end
+    end
+    local lad = self:LadderRaw(itemID)
+    if memo then memo[key] = lad or false end
+    return lad
+end
+
+function PC:LadderRaw(itemID)
+    if not itemID then return nil end
+    local v = self:VendorCost(itemID)
+    local steps, est = {}, false
+    local d = self:DepthTable()[itemID]
+    if d and d.list and #d.list > 0 then
+        for _, s in ipairs(d.list) do
+            if v and s.p >= v then break end -- the vendor's price or more: the vendor sells it for less
+            if s.p > 0 and s.q > 0 then steps[#steps + 1] = { p = s.p, q = s.q } end
+        end
+    else
+        local p = self:Price(itemID)
+        if p and p > 0 and (not v or p < v) then
+            local listed = self:Supply()[itemID]
+            steps[1] = { p = p, q = (type(listed) == "number" and listed > 0) and listed or math.huge }
+            est = true
+        end
+    end
+    if #steps == 0 and not v then return nil end
+    local cq, cc, q, c = {}, {}, 0, 0
+    for i, s in ipairs(steps) do
+        q = q + s.q
+        c = (s.q == math.huge) and c or (c + s.q * s.p) -- (an open-ended step only ever comes last)
+        cq[i], cc[i] = q, c
+    end
+    return { steps = steps, cq = cq, cc = cc, vendor = v, est = est }
+end
+
+-- A ladder with no listings: any amount at one price (made yourself, or a vendor)
+function PC:FlatLadder(price)
+    if not price then return nil end
+    return { steps = {}, cq = {}, cc = {}, vendor = price, flat = true }
+end
+
+-- What buying n off a ladder costs: total, average each, the priciest each, how many couldn't be had
+-- (nil when all can: only when nothing's left listed and no vendor sells it)
+function PC:LadderCost(lad, n)
+    if not lad or not n or n <= 0 then return 0, nil, nil, nil end
+    local steps, cq, cc = lad.steps, lad.cq, lad.cc
+    local last = #steps
+    if last > 0 and n <= cq[last] then
+        local lo, hi = 1, last
+        while lo < hi do
+            local mid = math.floor((lo + hi) / 2)
+            if cq[mid] >= n then hi = mid else lo = mid + 1 end
+        end
+        local total = (lo > 1 and cc[lo - 1] or 0) + (n - (lo > 1 and cq[lo - 1] or 0)) * steps[lo].p
+        return total, total / n, steps[lo].p, nil
+    end
+    local have = last > 0 and cq[last] or 0
+    local spent = last > 0 and cc[last] or 0
+    local rest = n - have
+    if lad.vendor then
+        local total = spent + rest * lad.vendor
+        return total, total / n, lad.vendor, nil
+    end
+    local top = last > 0 and steps[last].p or 0
+    local total = spent + rest * top
+    return total, total / n, top, rest
+end
+
+-- What buying n of an item costs the way the plan buys it (AH listings under the vendor's price,
+-- then the vendor): total, average each, priciest each, how many short. nil when there's no price.
+function PC:EffectiveCost(itemID, n)
+    local lad = self:Ladder(itemID)
+    if not lad then return nil end
+    return self:LadderCost(lad, n)
+end
+
+---------------------------------------------------------------------------
+-- The minimum profit: a craft has to make at least this share of what its materials cost.
+-- Lists hide recipes under it, buying stops before a craft would fall under it, and the Craftable
+-- column counts only the crafts that still clear it.
+---------------------------------------------------------------------------
+function PC:MinProfitPct()
+    local p = db and tonumber(db.minProfitPct) or self.MIN_PROFIT_DEFAULT
+    return math.max(0, math.min(p, 1000))
+end
+
+-- Does this recipe make at least the minimum profit (the way it's sold)?
+function PC:MeetsMin(e)
+    return e ~= nil and e.profitPct ~= nil and e.profit ~= nil and e.profit > 0 and e.profitPct >= self:MinProfitPct()
+end
+
+-- Does an AH craft really sell? What sold today against what's listed now: fewer than half as many sold
+-- as are listed won't sell in the window you post it (not a best bet, not for Make me gold); more sold
+-- than listed is a hot seller (those come first). A vendor buys on the spot and disenchanting isn't
+-- sold as the item: neither is held to it. Returns ok, hot, sold/listed (nil when it can't be told).
+PC.SELL_THROUGH_MIN = 0.5
+function PC:SellThroughOf(route, listed, soldToday)
+    if route ~= "AH" then return true, false, nil end
+    soldToday = soldToday or 0
+    if listed == nil then return true, false, nil end -- (not scanned yet: the sold-today rule decides)
+    if listed <= 0 then return true, soldToday > 0, nil end
+    local r = soldToday / listed
+    return r >= self.SELL_THROUGH_MIN, soldToday > listed, r
+end
+function PC:SellThrough(e)
+    if not e then return false, false, nil end
+    return self:SellThroughOf(e.route, e.listed, e.soldToday)
+end
+
+-- The same, one way of selling: on the AH (after its cut) or to a vendor (the recipe tables' two boxes)
+function PC:MeetsMinAH(e)
+    return e ~= nil and e.ahProfit ~= nil and e.ahProfit > 0 and e.ahProfitPct ~= nil and e.ahProfitPct >= self:MinProfitPct()
+end
+function PC:MeetsMinV(e)
+    return e ~= nil and e.vendorProfit ~= nil and e.vendorProfit > 0 and e.vendorProfitPct ~= nil and e.vendorProfitPct >= self:MinProfitPct()
+end
+
+-- May this recipe be recommended? Not for the Auction House when none sold there today
+-- (Settings: "Only recommend AH crafts that sold today")
+function PC:SalesOK(e)
+    if not e or e.route ~= "AH" or not (db and db.needSalesToday ~= false) then return true end
+    return (e.soldToday or 0) > 0
+end
+
+-- Is the plan in hand made to earn gold? (Skill up and Gear upgrades plans aren't: the minimum
+-- profit doesn't hold them back)
+function PC:PlanForProfit(name)
+    name = name or self:PlanName()
+    if name == "Gear upgrades" then return false end
+    if self.UI and self.UI.IsSkillPlan and self.UI:IsSkillPlan(name) then return false end
+    return true
+end
+
+-- What one craft brings in, each way: on the AH (after its cut; nil when it can't be listed there),
+-- to a vendor, and the way the recipe is sold
+function PC:CraftIncome(e)
+    local qty = e.r and e.r.qty or 1
+    local ah = (e.sellEach and self:AHSellable(e.sellEach)) and e.sellEach * qty * (1 - self.AH_CUT) or nil
+    local v = (e.vendorSell and e.vendorSell > 0) and e.vendorSell or nil
+    local route = (e.profit and e.cost) and (e.profit + e.cost) or nil
+    return ah, v, route
+end
+
+-- Craftable at Profit: how many crafts of a recipe your materials (bags, bank, mail) and your budget
+-- cover, buying the rest cheapest first at real listing prices, while every craft still makes a profit
+-- (on the AH or to a vendor, whichever lasts longer). Returns:
+--   n, worth and spend for those n (materials: yours at today's price, the rest at what they'd cost;
+--   the gold it takes), Total AH Profit (only the crafts still at a profit on the AH: nAH of them),
+--   Total V Profit (the same to a vendor: nV), why it stops ("gold", "market", "profit", "max"),
+--   est (true when a material had no live listings: priced at its cheapest), nAH, nV
+-- nil when a material has no price, or there's no price to sell at.
+function PC:Craftable(e, budget)
+    if not e or not e.r or not e.r.reagents then return nil end
+    -- (explicit lengths: some of the answers can be nil, and unpack stops at the first gap otherwise)
+    if not budget and e._craft then return unpack(e._craft, 1, 9) end
+    local res
+    if e.ahFlip then res = { self:FlipCraftableRaw(e, budget or self:Gold()) }
+    else res = { self:CraftableRaw(e, budget or self:Gold()) } end
+    if not budget then e._craft = res end
+    return unpack(res, 1, 9)
+end
+
+-- How many crafts of a recipe your bags have room for, up to `upto`: the materials still to buy (made
+-- ones opened up into what makes them) and what's made, when it has to wait in your bags - the same
+-- count as the plan's own bag check (PC:PlanSlots), the bank's free slots included while it's open.
+-- A quick count first, then the plan's own check settles the exact number.
+function PC:BagRoomCrafts(e, upto)
+    upto = math.max(math.floor(upto or 0), 0)
+    if upto == 0 then return 0 end
+    local free = self:FreeBagSlots()
+    local memo = self._memo
+    local function exact(k)
+        if k <= 0 then return true end
+        local key = memo and ("room" .. tostring(e.id) .. ":" .. k)
+        if key and memo[key] ~= nil then return memo[key] end
+        local okS, need = pcall(self.PlanSlots, self, { setmetatable({ planCount = k }, { __index = e }) })
+        local fits = (not okS) or need <= free -- (can't tell: no limit from the bags)
+        if key then memo[key] = fits end
+        return fits
+    end
+    if exact(upto) then return upto end
+    -- quick count: each raw thing to buy per craft, stacks, what you already have
+    local items = {}
+    local function add(id, per, have)
+        local it = items[id]
+        if not it then it = { per = 0, have = have or 0, stack = math.max(self:StackSize(id), 1) }; items[id] = it end
+        it.per = it.per + per
+    end
+    for _, rg in ipairs(e.r.reagents or {}) do
+        local id, _, src = self:ReagentFor(rg, e.mats)
+        local _, sr = self:RecipeFor(id)
+        if src == "Craft" and sr and sr.reagents and #sr.reagents > 0 then
+            local per = rg.n / math.max(sr.qty or 1, 1)
+            for _, sg in ipairs(sr.reagents) do add((self:ReagentFor(sg, "low")), sg.n * per, self:ReagentCount(sg)) end
+        else
+            add(id, rg.n, (e.mats == "high") and self:ItemCount(id) or self:ReagentCount(rg))
+        end
+    end
+    local outID = e.outID or e.r.output
+    local outStack = math.max(self:StackSize(outID), 1)
+    local skill = self.UI and self.UI.IsSkillPlan and self.UI:IsSkillPlan()
+    local countOut = not (skill or e.route == "Vendor" or e.route == "Disenchant")
+    local reagentFree = self:FreeReagentBagSlots()
+    local function quick(k)
+        local s = 0
+        for _, it in pairs(items) do
+            local buy = math.ceil(k * it.per) - it.have
+            if buy > 0 then s = s + math.ceil(buy / it.stack) end
+        end
+        local inReagent = math.min(s, reagentFree)
+        s = s - inReagent
+        if countOut then
+            local out = math.ceil(k * math.max(e.r.qty or 1, 1) / outStack)
+            local mats = 0
+            for _, rg in ipairs(e.r.reagents or {}) do
+                mats = mats + math.ceil(rg.n * k / math.max(self:StackSize((self:ReagentFor(rg, e.mats))), 1))
+            end
+            s = s + math.max(out - mats, 0) + math.min(inReagent, out, mats)
+        end
+        return s
+    end
+    local lo, hi = 0, upto
+    while lo < hi do
+        local mid = math.floor((lo + hi + 1) / 2)
+        if quick(mid) <= free then lo = mid else hi = mid - 1 end
+    end
+    -- the plan's own check, from the quick count: up while it still fits, down while it doesn't
+    local k = lo
+    if exact(k) then
+        while k < upto and exact(k + 1) do k = k + 1 end
+    else
+        while k > 0 and not exact(k) do k = k - 1 end
+    end
+    return k
+end
+
+-- The same, but the way it's sold must make at least the minimum profit (what buying will really do)
+function PC:CraftableAtMin(e, budget)
+    if not e or not e.r or not e.r.reagents or e.ahFlip then return nil end
+    if not budget and e._craftMin then return unpack(e._craftMin, 1, 9) end
+    local res = { self:CraftableRaw(e, budget or self:Gold(), self:MinProfitPct()) }
+    if not budget then e._craftMin = res end
+    return unpack(res, 1, 9)
+end
+
+-- How many crafts of a recipe buying goes for: the ones that each still make the minimum profit with all
+-- their materials together (yours first, the rest priced up the listings: CraftableRaw), and never fewer
+-- than the crafts your scarce materials (ones no vendor sells) already cover: their other materials are
+-- bought to finish them. Returns that count, the count at the minimum, the count you hold the scarce
+-- materials for, and why the count at the minimum stops; nil when a price is missing (no limit from the profit).
+function PC:BuyCrafts(e)
+    if not e or not e.r or not e.r.reagents or e.ahFlip then return nil end
+    local memo = self._memo
+    local key = memo and ("buyc" .. tostring(e.id) .. ":" .. tostring(e.mats))
+    if key and memo[key] then return unpack(memo[key], 1, 4) end
+    local res = {}
+    local slots = self:BatchSlots(e)
+    if slots then
+        local j, _, _, _, _, jwhy = self:CraftableRaw(e, math.huge, self:MinProfitPct(), true)
+        local held, all
+        for _, s in ipairs(slots) do
+            local c = math.floor(s.have / math.max(s.n, 1))
+            all = math.min(all or c, c)
+            if not s.lad.vendor then held = math.min(held or c, c) end
+        end
+        held = held or all or 0
+        if j then res = { math.max(j, held), j, held, jwhy } end
+    end
+    if key then memo[key] = res end
+    return unpack(res, 1, 4)
+end
+
+-- A recipe's materials for batch maths: { {n, have, unit, lad}, ... } and whether a price is only the
+-- cheapest one (no live listings). nil when a material has no price.
+function PC:BatchSlots(e)
+    if not e or not e.r or not e.r.reagents or not e.cost then return nil end
+    local mode = e.mats or "low"
+    local slots, est = {}, false
+    for _, rg in ipairs(e.r.reagents) do
+        local id, unit, src, rank = self:ReagentFor(rg, mode)
+        if not unit then return nil end
+        local lad = (src == "AH" or src == "Vendor") and self:Ladder(id) or nil
+        lad = lad or self:FlatLadder(unit)
+        if lad.est then est = true end
+        local have = (mode == "high" and rank) and self:ItemCount(id) or self:ReagentCount(rg)
+        slots[#slots + 1] = { n = rg.n, have = have, unit = unit, lad = lad }
+    end
+    return slots, est
+end
+
+-- n crafts' materials: the gold to buy what you don't have, and what they're all worth (yours at
+-- today's price, the rest at what they'd cost). nil when the market doesn't have enough.
+function PC:BatchCost(slots, n)
+    local spend, worth = 0, 0
+    for _, s in ipairs(slots) do
+        local need = n * s.n
+        local own = math.min(need, s.have)
+        local buy = need - own
+        if buy > 0 then
+            local total, _, _, short = self:LadderCost(s.lad, buy)
+            if short then return nil end
+            spend, worth = spend + total, worth + total
+        end
+        worth = worth + own * s.unit
+    end
+    return spend, worth
+end
+
+-- Profit of exactly n crafts, materials priced for the whole batch: AH profit, vendor profit, the
+-- profit the way it's sold, the gold it takes. nil when a price is missing or the market runs short.
+function PC:BatchProfit(e, n)
+    local slots = self:BatchSlots(e)
+    if not slots or not n or n <= 0 then return nil end
+    local spend, worth = self:BatchCost(slots, n)
+    if not spend then return nil end
+    local ahIn, vIn, routeIn = self:CraftIncome(e)
+    return ahIn and (n * ahIn - worth) or nil, vIn and (n * vIn - worth) or nil,
+        routeIn and (n * routeIn - worth) or nil, spend
+end
+
+-- minPct nil: "at profit": the crafts that still make a profit, each way (on the AH, to a vendor, the way
+-- it's sold), every craft priced as the batch climbs the listings. minPct a number: the way it's sold
+-- must make at least that share of its materials' cost (CraftableAtMin, what buying will do).
+function PC:CraftableRaw(e, budget, minPct, noBags)
+    local slots, est = self:BatchSlots(e)
+    if not slots then return nil end
+    local ahIn, vIn, routeIn = self:CraftIncome(e)
+    if not (ahIn or vIn or routeIn) then return nil end -- no price to sell at: can't tell
+    -- (each amount is worked out once: the searches ask for the same ones again)
+    local seen = {}
+    local function batch(n)
+        local c = seen[n]
+        if not c then c = { self:BatchCost(slots, n) }; seen[n] = c end
+        return c[1], c[2]
+    end
+    -- the most the market could ever supply (a material nobody else sells: what's listed plus yours)
+    local most = self.MAX_CRAFTABLE
+    for _, s in ipairs(slots) do
+        local lad = s.lad
+        if not lad.vendor then
+            local listed = #lad.steps > 0 and lad.cq[#lad.steps] or 0
+            most = math.min(most, math.floor((s.have + listed) / math.max(s.n, 1)))
+        end
+    end
+    -- the most crafts your gold and the market cover where every craft, selling at `income` each, makes a
+    -- profit of at least pct% of what its materials are worth (more than nothing at 0%) -> n, why
+    -- the AH deposit for what's posted comes out of the same gold (as the plan counts it)
+    local feeEach = 0
+    if e.route ~= "Vendor" and e.route ~= "Disenchant" and self.Sell and self.Sell.FeeEach then
+        local okF, f = pcall(self.Sell.FeeEach, self.Sell, e.outID or e.r.output)
+        feeEach = (okF and f or 0) * math.max(e.r.qty or 1, 1)
+    end
+    local function search(income, pct)
+        if not income then return 0, "profit" end
+        local why
+        local function ok(k)
+            local s1, w1 = batch(k)
+            if not s1 then why = "market" return false end
+            if s1 + (feeEach > 0 and (feeEach * k + 100) or 0) > budget then why = "gold" return false end
+            local _, w0 = batch(k - 1)
+            local cost = w1 - (w0 or 0)
+            local margin = income - cost
+            if margin <= 0 or margin < cost * pct / 100 then why = "profit" return false end
+            return true
+        end
+        if most < 1 then return 0, "market" end
+        if not ok(1) then return 0, why end
+        local cap = math.min(self.MAX_CRAFTABLE, most + 1) -- (one past what's listed: its "no" says why)
+        local lo, hi = 1, 2
+        while hi <= cap and ok(hi) do lo, hi = hi, hi * 2 end
+        if hi > cap then
+            hi = cap
+            if ok(hi) then lo = hi; if hi == self.MAX_CRAFTABLE then why = "max" end end
+        end
+        while lo < hi - 1 do
+            local mid = math.floor((lo + hi) / 2)
+            if ok(mid) then lo = mid else hi = mid end
+        end
+        if lo < self.MAX_CRAFTABLE then ok(lo + 1) end -- (says why it stops there)
+        return lo, why
+    end
+    -- the profit of the first k crafts at `income` each (the whole batch's materials); none at a profit
+    -- that way: what it would lose on the crafts counted (or on one), never left blank
+    local function total(income, k, n)
+        if not income then return nil end
+        local m = (k > 0) and k or math.max(n, 1)
+        local s, w = batch(m)
+        if not s then return nil end -- (the market doesn't have even that)
+        return m * income - w
+    end
+    local n, why, nAH, nV
+    if minPct then
+        n, why = search(routeIn, minPct)
+        nAH, nV = n, n
+    else
+        local nR, wR = search(routeIn, 0)
+        local wA, wV
+        nAH, wA = search(ahIn, 0)
+        nV, wV = search(vIn, 0)
+        n, why = nR, wR
+        if nAH > n then n, why = nAH, wA end
+        if nV > n then n, why = nV, wV end
+    end
+    -- and no more than your bags have room for (what the plan would let you add)
+    if n > 0 and not noBags then
+        local room = self:BagRoomCrafts(e, n)
+        if room < n then
+            n, why = room, "bags"
+            nAH, nV = math.min(nAH, room), math.min(nV, room)
+        end
+    end
+    local spend, worth = 0, 0
+    if n > 0 then spend, worth = batch(n) end
+    return n, worth, spend, total(ahIn, nAH, n), total(vIn, nV, n), why, est, nAH, nV
+end
+
+-- An AH flip (bought on the AH, sold to a vendor): how many listed under what a vendor pays your gold
+-- covers, and the profit selling those to a vendor (or listing them again on the AH, after its cut).
+-- Same answers as CraftableRaw (nAH is 0: listing it again never pays).
+function PC:FlipCraftableRaw(e, budget)
+    local id, vend, p0 = e.ahFlipID, e.sell, e.cost
+    local lad = id and self:Ladder(id)
+    if not (lad and vend and p0) then return nil end
+    local n, spend, why = 0, 0, "market"
+    for _, s in ipairs(lad.steps) do
+        if s.p >= vend then why = "profit" break end
+        local afford = math.floor((budget - spend) / s.p)
+        local take = math.min(s.q, afford, self.MAX_CRAFTABLE - n)
+        if take > 0 then n, spend = n + take, spend + take * s.p end
+        if n >= self.MAX_CRAFTABLE then why = "max" break end
+        if take < s.q then why = "gold" break end
+    end
+    local ahEach = p0 * (1 - self.AH_CUT)
+    if n == 0 then return 0, 0, 0, ahEach - p0, vend - p0, why, lad.est, 0, 0 end
+    return n, spend, spend, n * ahEach - spend, n * vend - spend, why, lad.est, 0, n
+end
+
+---------------------------------------------------------------------------
+-- The plan's recipes that use a material, the ones that can pay most for it first:
+-- { { e, n (per craft), need (for the plan), cap (the most one may cost at the minimum profit) }, ... }
+---------------------------------------------------------------------------
+--   need: what the crafts buying goes for take (PC:BuyCrafts, no more than the plan's count), cut: that's
+--   fewer than the plan's count, heldCrafts: the crafts your scarce materials cover, free: the most one
+--   may cost to finish one of those (the craft still brings in more than it and the others still to buy)
+function PC:MaterialDemands(itemID, entries)
+    local minPct = self:MinProfitPct()
+    -- what a recipe's other materials cost for its k-th craft, yours first (cash: only the gold still to spend)
+    local function othersAt(slots, skip, k, cash)
+        local c = 0
+        for i, s in ipairs(slots) do
+            if i ~= skip then
+                local s1, w1 = self:BatchCost({ s }, k)
+                local s0, w0 = self:BatchCost({ s }, k - 1)
+                if not w1 then return nil end
+                if cash then c = c + s1 - (s0 or 0) else c = c + w1 - (w0 or 0) end
+            end
+        end
+        return c
+    end
+    local demands = {}
+    for _, e in ipairs(entries) do
+        local _, _, routeIn = self:CraftIncome(e)
+        for i, rg in ipairs(e.r and e.r.reagents or {}) do
+            local id = self:ReagentFor(rg, e.mats)
+            if id == itemID then
+                local n = math.max(rg.n, 1)
+                local target, j, held, jwhy = self:BuyCrafts(e)
+                local cap, free = math.huge, math.huge
+                if routeIn then
+                    -- the most one may cost for the last craft that still makes the minimum
+                    local slots = self:BatchSlots(e)
+                    slots = slots and #slots == #e.r.reagents and slots or nil
+                    local others = slots and othersAt(slots, i, math.max(j or 1, 1))
+                    if not others then
+                        others = 0
+                        for _, rg2 in ipairs(e.r.reagents) do
+                            if rg2 ~= rg then
+                                local _, u2 = self:ReagentFor(rg2, e.mats)
+                                others = others + (u2 or 0) * rg2.n
+                            end
+                        end
+                    end
+                    cap = (routeIn / (1 + minPct / 100) - others) / n
+                    -- (finishing a held craft must not cost more gold than it brings in, all its materials together)
+                    local cash = slots and othersAt(slots, i, math.max(held or 1, 1), true)
+                    free = (routeIn - (cash or others)) / n
+                end
+                local want = e.planCount or 1
+                -- (a count cut short by the market isn't a profit stop: that material's own buying runs out)
+                local limit = jwhy == "profit" and target or nil
+                local crafts = limit and math.min(want, limit) or want
+                demands[#demands + 1] = { e = e, n = rg.n, need = rg.n * crafts, cap = cap, free = free,
+                    heldCrafts = held or 0, cut = crafts < want }
+            end
+        end
+    end
+    table.sort(demands, function(a, b) return a.cap > b.cap end)
+    return demands
+end
+
+-- Buying a material stopped for good at the minimum profit: each recipe in the plan that uses it is
+-- amended to the crafts buying goes for (PC:BuyCrafts: the ones that make the minimum, or what your
+-- scarce materials already cover, bags, bank, mail and purchases on their way counted), so it stops
+-- asking for what won't be bought. Not for Skill up / Gear plans. /pc undo puts it back.
+-- Returns the changes { { e, from, to }, ... } (said in chat).
+function PC:AmendPlanToHeld(itemID)
+    if not itemID or not self:PlanForProfit() or not (self.UI and self.UI.PlanEntries) then return {} end
+    if not self.UI.allEntries then self.UI.allEntries = self:Analyze() end
+    local plan = self:CurrentPlan()
+    local changes, old = {}, {}
+    for _, d in ipairs(self:MaterialDemands(itemID, self.UI:PlanEntries())) do
+        local cur = plan[d.e.id] or 0
+        local crafts = math.min(cur, math.floor(d.need / math.max(d.n, 1)))
+        if crafts < cur then
+            old[d.e.id] = cur
+            plan[d.e.id] = crafts > 0 and crafts or nil
+            changes[#changes + 1] = { e = d.e, from = cur, to = crafts }
+        end
+    end
+    if #changes == 0 then return changes end
+    self:PushUndo({ kind = "amend", counts = old })
+    self:ForgetStopList()
+    if self.UI then self.UI.allEntries = nil end
+    local parts = {}
+    for _, c in ipairs(changes) do parts[#parts + 1] = ("%s %d %s %d"):format(c.e.r.name, c.from, self.ARROW_R, c.to) end
+    self.Buy:Say(("|cffffd100Plan amended to what buying gets: %s. More %s would drop the craft under %d%% profit. |cff888888(/pc undo reverts it)|r|r"):format(
+        table.concat(parts, ", "), self:ItemName(itemID) or "material", self:MinProfitPct()))
+    self:RefreshUI()
+    return changes
+end
+
+-- (an amendment is asked for from inside a refresh too: it happens just after it)
+function PC:AmendPlanSoon(itemID)
+    self._amend = self._amend or {}
+    if self._amend[itemID] then return end
+    self._amend[itemID] = true
+    C_Timer.After(0, function()
+        self._amend[itemID] = nil
+        self:Safe("amend plan", self.AmendPlanToHeld, self, itemID)
+    end)
+end
+
+---------------------------------------------------------------------------
+-- How much of a material to buy before it stops paying: walking the listings cheapest first, each one
+-- bought has to keep the craft it's for at or above the minimum profit. A material several recipes in
+-- the plan use goes to whichever can pay for it. Materials you already hold go to the recipes that
+-- can pay most (buying is only for the ones further down).
+--   want: how many the plan still wants; ladder: what's listed ({ {p, q}, ... } cheapest first;
+--   default: the live listings); entries: the plan's recipes (default: the plan in hand)
+-- Returns how many to buy, the most to pay for one (nil = no limit), and why it stops ("profit", "market", "have" or nil).
+---------------------------------------------------------------------------
+function PC:ProfitableBuyQty(itemID, want, ladder, entries)
+    want = math.max(math.floor(want or 0), 0)
+    if want == 0 or not itemID then return 0 end
+    if not self:PlanForProfit() then return want end -- skill-ups and gear: not held to a profit
+    entries = entries or (self.UI and self.UI.PlanEntries and self.UI:PlanEntries()) or {}
+    local demands = self:MaterialDemands(itemID, entries)
+    if #demands == 0 then return want end -- not for a recipe in the plan (a tool, a flip): as asked
+    -- what you hold (bags, bank, mail, purchases on their way) covers the recipes that pay most: buying
+    -- is only ever for the next ones down. (Handed to the ones that pay least, every fresh look after a
+    -- purchase moved the line and bought past the stop, a bit at a time.)
+    local own = self:ItemCount(itemID)
+    local cut = false
+    for _, d in ipairs(demands) do
+        local use = math.min(own, d.need)
+        d.need, own = d.need - use, own - use
+        d.ownCrafts = math.floor(use / math.max(d.n, 1))
+        if d.cut then cut = true end
+    end
+    -- the units still to buy, each with the most it may cost (finishing crafts your scarce materials
+    -- cover: while the craft brings in more), priciest-allowed first
+    local caps = {}
+    for _, d in ipairs(demands) do
+        local freeN = math.min(d.need, math.max(d.heldCrafts - d.ownCrafts, 0) * d.n)
+        for k = 1, math.min(d.need, want - #caps) do caps[#caps + 1] = (k <= freeN) and math.max(d.free, d.cap) or d.cap end
+        if #caps >= want then break end
+    end
+    -- (fewer crafts than the plan's count make the minimum: the rest stop for the profit)
+    if #caps == 0 then return 0, nil, cut and "profit" or "have" end
+    table.sort(caps, function(a, b) return a > b end)
+    local maxEach = caps[1] ~= math.huge and caps[1] or nil
+    -- the listings, cheapest first, one price per unit (only as many as could be wanted); by default
+    -- the AH listings under the vendor's price (the vendor sells the rest)
+    local prices = {}
+    local lad = ladder
+    if not lad then
+        local L = self:Ladder(itemID)
+        lad = L and L.steps
+    end
+    -- nothing known about what's listed: the AH's own price quote has to settle it (most to pay: maxEach)
+    if not lad or #lad == 0 then return math.min(want, #caps), maxEach, (cut and #caps < want) and "profit" or nil end
+    for _, s in ipairs(lad) do
+        for _ = 1, s.q do
+            prices[#prices + 1] = s.p
+            if #prices >= math.min(want, #caps) then break end
+        end
+        if #prices >= math.min(want, #caps) then break end
+    end
+    -- the most of the cheapest q units that can each go to a recipe that pays for it:
+    -- match the priciest of them to the most generous caps
+    local function fits(q)
+        for j = 1, q do
+            if prices[q - j + 1] > caps[j] then return false end
+        end
+        return true
+    end
+    local lo, hi = 0, math.min(want, #caps, #prices)
+    while lo < hi do
+        local mid = math.floor((lo + hi + 1) / 2)
+        if fits(mid) then lo = mid else hi = mid - 1 end
+    end
+    -- (prices were only read as far as the units wanted: fewer than that is the market running out)
+    local top = math.min(want, #caps)
+    local why
+    if lo < math.min(top, #prices) then why = "profit"
+    elseif lo < top and #prices < top then why = "market"
+    elseif cut and lo < want then why = "profit" end
+    return lo, maxEach, why
+end
+
 -- Every price ProfitCrafter knows for an item, for tooltips. Marks the one it's using.
 function PC:PriceSourceLines(itemID)
     local lines = { "|cffffd100Prices known:|r" }
@@ -2575,13 +3342,13 @@ function PC:PriceSourceLines(itemID)
     end
     if ah then
         local when = self:Checked()[itemID]
-        local label = src and ("From " .. src) or "Your AH scan"
+        local label = src and ("From " .. src) or "Your auction scan"
         if when then label = label .. (" (%s ago)"):format(self:Ago(time() - when)) end
         line(label, ah, usedSrc == "AH" and used == ah)
     end
     if db.vendor[itemID] then
         local r = self:BarterRank()
-        line(r > 0 and ("Vendor (Bartering %d%% off)"):format(r * 5) or "Vendor", self:VendorCost(itemID), usedSrc == "Vendor")
+        line(r > 0 and ("A vendor charges (Bartering %d%% off)"):format(r * 5) or "A vendor charges", self:VendorCost(itemID), usedSrc == "Vendor")
     end
     if not ah then
         local auc = self:AuctionatorPrice(itemID)
@@ -2589,7 +3356,7 @@ function PC:PriceSourceLines(itemID)
         local tsm = self.TSMPrice and self:TSMPrice(itemID)
         if tsm then line("TSM", tsm, usedSrc == "AH" and used == tsm) end
     end
-    if #lines == 1 then lines[#lines + 1] = "  |cff888888none yet: scan the AH or visit a vendor that sells it|r" end
+    if #lines == 1 then lines[#lines + 1] = "  |cff888888none yet: scan the Auction House or visit a vendor that sells it|r" end
     return lines
 end
 
@@ -2686,6 +3453,8 @@ end
 function PC:AnalyzeRaw()
     local out = {}
     self._omap = nil -- recipes may have changed since last time
+    local today, minPct = self:SecondsToday(), self:MinProfitPct()
+    local needSales = db.needSalesToday ~= false
     for recipeID, r in pairs(self:ShownRecipes()) do
         local quality, qualitySet = self:CraftQuality(r)
         local low = self:Evaluate(r, "low", quality)
@@ -2718,24 +3487,33 @@ function PC:AnalyzeRaw()
         elseif via == "AH" and best.ahProfit then profit, route = best.ahProfit, "AH" end
         -- How many are already listed, and a "best bet" score that favors items that will actually sell
         local listed = self:Supply()[outID]
-        local score
-        if profit and profit > 0 then
-            if route == "Vendor" then
-                score = profit                                  -- sells instantly
-            elseif route == "Disenchant" then
-                score = profit / 2                              -- the dust still has to sell
-            elseif listed then
-                score = profit / (1 + listed / 10)              -- more competition, lower score
-            else
-                score = profit / 3                              -- unknown competition: be cautious
-            end
-        end
-
         local soldAt, soldMine = self:LastSold(outID)
         -- Sold today (since midnight): estimated from scans, or your own sales if that's more; 0 when unknown
-        local est = self:SalesEstimate(outID, self:SecondsToday())
-        local mine = self:MySales(self:ItemName(outID), self:SecondsToday())
+        local est = self:SalesEstimate(outID, today)
+        local mine = self:MySales(self:ItemName(outID), today)
         local soldToday = math.max(est or 0, mine or 0)
+        local profitPct = (profit and cost and cost > 0) and (profit / cost * 100) or nil
+        local score
+        -- best bets clear the minimum profit, and an AH craft only when some sold there today and at
+        -- least half as many sold today as are listed now (else it won't sell in the window you post it)
+        local salesOK = route ~= "AH" or not needSales or soldToday > 0
+        local sells, hot = self:SellThroughOf(route, listed, soldToday)
+        if profit and profit > 0 and profitPct and profitPct >= minPct and salesOK and sells then
+            -- profit potential: the profit on what the market buys in a day (at least one craft); hot
+            -- sellers (more sold today than listed) ahead of the rest
+            local per = math.max(r.qty or 1, 1)
+            local potential
+            if route == "Vendor" then
+                potential = profit * 20                         -- a vendor buys any amount: counted as 20 a day
+            elseif route == "Disenchant" then
+                potential = profit / 2                          -- the dust still has to sell
+            elseif soldToday > 0 then
+                potential = profit * math.max(soldToday / per, 1)
+            else
+                potential = profit / 3                          -- nothing to go on: be cautious
+            end
+            score = potential + (hot and self.HOT_TIER or 0)
+        end
 
         out[#out + 1] = {
             id = recipeID,
@@ -2759,11 +3537,15 @@ function PC:AnalyzeRaw()
             mats = best.mode,                         -- "low" or "high" quality materials
             matsPicked = pick ~= nil and high ~= nil, -- you chose low/high yourself
             low = low, high = high,                   -- both ways worked out (high = nil if it doesn't apply)
-            profitPct = (profit and cost and cost > 0) and (profit / cost * 100) or nil, -- return on the mats
+            profitPct = profitPct,                    -- return on the mats, the way it's sold
+            ahProfitPct = (best.ahProfit and cost and cost > 0) and (best.ahProfit / cost * 100) or nil,
+            vendorProfitPct = (best.vendorProfit and cost and cost > 0) and (best.vendorProfit / cost * 100) or nil,
+            noSalesToday = route == "AH" and soldToday <= 0 or nil, -- not recommended for the AH (see PC:SalesOK)
             lastSold = soldAt and (time() - soldAt) or nil,   -- seconds ago (sorts newest first)
             lastSoldDays = self:DaysAgo(soldAt),
             soldToday = soldToday,
             soldTodayKnown = est ~= nil or (mine or 0) > 0,
+            hot = (score ~= nil and hot) or nil,      -- a best bet selling faster than it's listed
             lastSoldMine = soldMine,
         }
     end
@@ -2848,8 +3630,9 @@ function PC:ShoppingList(entry, crafts, mode)
             if unit then
                 sub = buy * unit
                 if src == "AH" then
-                    -- buying a lot climbs the price ladder: use the live listings
-                    local t, avg, hi, sh = self:CostForQty(id, buy)
+                    -- buying a lot climbs the price ladder: the live listings (under a vendor's price,
+                    -- then the vendor for the rest)
+                    local t, avg, hi, sh = self:EffectiveCost(id, buy)
                     if t then sub, unit, top, short = t, avg, hi, sh end
                 end
                 total = total + sub
@@ -2880,18 +3663,35 @@ function PC:StopShopList(entries, crafts)
     local f = self.frozenShop
     if not at then
         self.frozenShop = nil
-    elseif f and f.plan == self:PlanName() and f.crafts == crafts and (GetTime() - f.t) < 120 then
+    elseif f and f.plan == self:PlanName() and f.crafts == crafts and (GetTime() - f.t) < 120 and f.sig == self:EntriesSig(entries) then
         -- what's in your bags is the only thing that can have changed while you stand here
         for _, it in ipairs(f.list) do
             if it.high or not (it.slot and it.slot.n) then it.have = self:ItemCount(it.id)
             else it.have = self:ReagentCount(it.slot) end
+            -- and so what's still to buy (it used to stay at the amount from when you walked up, so the
+            -- Task Button kept offering what you'd already bought)
+            it.buy = math.max((it.need or 0) - it.have, 0)
+            if it.craft then
+                it.buy = it.craft.fromOwn and math.max((it.need or 0) - it.have - (it.craftCover or 0), 0) or 0
+            end
         end
         return f.buy, f.list
     end
     local buy = (self.Craft and self.Craft.BuyEntries) and self.Craft:BuyEntries(entries) or entries
     local list = self:CombinedShoppingList(buy, crafts)
-    if at then self.frozenShop = { plan = self:PlanName(), crafts = crafts, buy = buy, list = list, t = GetTime() } end
+    if at then self.frozenShop = { plan = self:PlanName(), crafts = crafts, buy = buy, list = list, t = GetTime(), sig = self:EntriesSig(entries) } end
     return buy, list
+end
+
+-- The plan's recipes and counts in one string: the list kept at a stop is only kept while it's the same
+-- (a count changed, the plan amended, a craft made: what to buy is worked out again)
+function PC:EntriesSig(entries)
+    local parts = {}
+    for _, e in ipairs(entries or {}) do
+        parts[#parts + 1] = tostring(e.id) .. "/" .. tostring(e.planCount) .. "/" .. tostring(e.mats) .. "/" .. tostring(e.sub)
+    end
+    table.sort(parts)
+    return table.concat(parts, ":")
 end
 
 -- the plan changed, or something was crafted: what to buy is worked out again next time
@@ -3019,7 +3819,7 @@ function PC:CombinedShoppingListRaw(entries, crafts)
         elseif it.unit then
             it.sub = it.buy * it.unit
             if it.src == "AH" then
-                local t, avg, hi, sh = self:CostForQty(it.id, it.buy)
+                local t, avg, hi, sh = self:EffectiveCost(it.id, it.buy)
                 if t then it.sub, it.unit, it.top, it.short = t, avg, hi, sh end
             end
             total = total + it.sub
@@ -3276,12 +4076,12 @@ function PC:AUCTION_HOUSE_SHOW()
     local last = db.scanTime[self:Faction()]
     local fresh = last and time() - last < self.AUTO_SCAN_EVERY
     if db.autoScan and fresh then
-        Print(("Auction House opened. Prices are from %d min ago: no full scan until the hour's up (Scan AH to do one now)."):format(math.floor((time() - last) / 60)))
+        Print(("Auction House opened. Prices are from %d min ago: no full scan until the hour's up (Scan auctions to do one now)."):format(math.floor((time() - last) / 60)))
     elseif db.autoScan then
         Print("Auction House opened.")
         C_Timer.After(2.5, function() self:Safe("auto scan", self.StartScan, self, true) end)
     else
-        Print("Auction House opened. Auto-scan is off: click Scan AH or type /pc scan.")
+        Print("Auction House opened. Auto-scan is off: click Scan auctions or type /pc scan.")
     end
     -- Add the ProfitCrafter tab once the game has finished building the AH window
     C_Timer.After(0.1, function()
@@ -3350,8 +4150,13 @@ end
 
 function PC:AUCTION_HOUSE_BROWSE_RESULTS_UPDATED()
     if self.scanMode == "quick" and self.quick and self.quick.batch then
-        -- results can arrive in pieces; wait a moment for the rest
-        self:Debounce("browse", 0.5, function() self:ScanStep(self.QuickResultsArrived) end)
+        -- all of them in (the AH says so): read them now; else they can arrive in pieces: a moment for the rest
+        local A = C_AuctionHouse
+        if A.HasFullBrowseResults and A.HasFullBrowseResults() then
+            self:Debounce("browse", 0, function() self:ScanStep(self.QuickResultsArrived) end)
+        else
+            self:Debounce("browse", 0.5, function() self:ScanStep(self.QuickResultsArrived) end)
+        end
     end
 end
 PC.AUCTION_HOUSE_BROWSE_RESULTS_ADDED = PC.AUCTION_HOUSE_BROWSE_RESULTS_UPDATED
@@ -3437,23 +4242,65 @@ function PC:BatchScaleRaw(list, later, matsOnly)
         if v > 0 then vend[#vend + 1] = { id = it.id, qty = v } end
     end
     if #vend == 0 then return 1 end
-    -- what the plan crafts now, for the room its finished items take (gear: a slot each)
+    -- materials bought on the AH and waiting in the mail: they need room once they're taken out
+    local mail = {}
+    for _, it in ipairs(list) do
+        local m = (not later[it.id] and self.MailPending) and math.min(self:MailPending(it.id), it.need or 0) or 0
+        if m > 0 then mail[#mail + 1] = { id = it.id, qty = m } end
+    end
+    -- what the plan crafts now: only the room its finished items take beyond the slots their materials
+    -- free up as they're used (as the plan's own bag check counts it: 1 clam + 1 spice make 1 clam dish,
+    -- no extra room; gear, a slot each, can need more than its materials took)
     local outs = {}
     local entries = (not matsOnly and self.UI and self.UI.PlanEntries) and self.UI:PlanEntries() or {}
     if not matsOnly and self.Craft and self.Craft.BuyEntries then entries = self.Craft:BuyEntries(entries) end
+    local skill = self.UI and self.UI.IsSkillPlan and self.UI:IsSkillPlan()
     for _, e in ipairs(entries) do
         local out = (e.disenchant and e.r.output) or e.outID or e.r.output
         local n = (e.planCount or 0) * math.max(e.r.qty or 1, 1)
-        if out and n > 0 then outs[#outs + 1] = { id = out, qty = n } end
+        if out and n > 0 and not (skill or e.route == "Vendor" or e.route == "Disenchant") then
+            local mats = {}
+            for _, rg in ipairs(e.r.reagents or {}) do
+                local rid = self:ReagentFor(rg, e.mats)
+                if rid then mats[#mats + 1] = { id = rid, per = rg.n * (e.planCount or 0) } end
+            end
+            outs[#outs + 1] = { id = out, qty = n, mats = mats }
+        end
     end
     local plain = self:FreeBagSlotsOnly() - (self.BUY_RESERVE or 1)
     local reagentBag = self:FreeReagentBagSlots()
+    -- (only materials in your bags or bought here free room as they're used: AH ones still to buy take none yet)
+    local inBags, vendQ, mailQ = {}, {}, {}
+    -- (held in the reagent bag, a material frees no room for what's made)
+    local plainHeld = {}
+    for _, sl in ipairs(self.BagSlots and self.BagSlots() or {}) do
+        if self:BagKind(sl.bag) ~= "reagent" then plainHeld[sl.id] = (plainHeld[sl.id] or 0) + sl.n end
+    end
+    for _, x in ipairs(outs) do for _, m in ipairs(x.mats) do inBags[m.id] = plainHeld[m.id] or 0 end end
+    for _, m in ipairs(vend) do vendQ[m.id] = m.qty end
+    for _, m in ipairs(mail) do mailQ[m.id] = m.qty end
     local function fits(k)
         local mats = 0
         for _, m in ipairs(vend) do mats = mats + self:SlotsFor(m.id, math.floor(m.qty * k)) end
-        local o = 0
-        for _, x in ipairs(outs) do o = o + self:SlotsFor(x.id, math.ceil(x.qty * k)) end
-        return math.max(mats - reagentBag, 0) + o <= plain
+        for _, m in ipairs(mail) do mats = mats + self:SlotsFor(m.id, math.ceil(m.qty * k)) end
+        local inReagent = math.min(mats, reagentBag)
+        local o, credit, left = 0, 0, {}
+        for _, x in ipairs(outs) do
+            local freed = 0
+            for _, m in ipairs(x.mats) do
+                if not left[m.id] then
+                    left[m.id] = inBags[m.id] + math.floor((vendQ[m.id] or 0) * k) + math.ceil((mailQ[m.id] or 0) * k)
+                end
+                local use = math.min(m.per * k, left[m.id])
+                left[m.id] = left[m.id] - use
+                freed = freed + math.ceil(use / math.max(self:StackSize(m.id), 1))
+            end
+            local slots = self:SlotsFor(x.id, math.ceil(x.qty * k))
+            o = o + math.max(slots - freed, 0)
+            credit = credit + math.min(slots, freed)
+        end
+        -- (materials used up from the reagent bag free no room for what's made)
+        return mats - inReagent + o + math.min(inReagent, credit) <= plain
     end
     if fits(1) then return 1 end
     if plain <= 0 or not fits(0.02) then return 0 end
@@ -3517,7 +4364,7 @@ function PC:HandleSlash(msg)
         if PC.Options then PC.Options:Open() end
     elseif msg == "resetprices" then
         wipe(PC:Prices()); wipe(PC:Checked()); wipe(PC:Supply()); wipe(PC:Source())
-        Print("All Auction House prices cleared. Open the AH and scan to get fresh ones.")
+        Print("All Auction House prices cleared. Open the Auction House and scan to get fresh ones.")
         PC:RefreshUI()
     elseif msg == "layout" then
         if PC.Steps then PC.Steps:ToggleLayout() end
@@ -3593,14 +4440,14 @@ function PC:HandleSlash(msg)
             Print("Bartering is a WoW Forever legacy perk; it doesn't apply here.")
         elseif n and n >= 0 and n <= PC.BARTER_MAX then
             db.barterSet = math.floor(n)
-            Print(("Bartering set to %d point%s: vendor prices %d%% off."):format(db.barterSet, db.barterSet == 1 and "" or "s", db.barterSet * 5))
+            Print(("Bartering set to %d point%s: vendors charge you %d%% less."):format(db.barterSet, db.barterSet == 1 and "" or "s", db.barterSet * 5))
             PC:RefreshUI()
         elseif arg == "auto" then
             db.barterSet = nil
             Print(("Bartering: worked out at vendors (now %d point%s, %d%% off)."):format(PC:BarterRank(), PC:BarterRank() == 1 and "" or "s", PC:BarterRank() * 5))
             PC:RefreshUI()
         else
-            Print(("Bartering: %d point%s, vendor prices %d%% off (%s). Change with /pc bartering 0, 1, 2 or auto."):format(PC:BarterRank(),
+            Print(("Bartering: %d point%s, vendors charge you %d%% less (%s). Set it with /pc bartering 0, 1, 2 or auto."):format(PC:BarterRank(),
                 PC:BarterRank() == 1 and "" or "s", PC:BarterRank() * 5, db.barterSet and "set by you" or "read at vendors"))
         end
     elseif msg == "advanced" or msg == "simple" then
@@ -3703,12 +4550,12 @@ function PC:HandleSlash(msg)
         Print("  Scanning right now: " .. (PC.scanning and yes or no))
         Print("  Next full scan allowed: " .. (wait > 0 and ("in %d:%02d"):format(math.floor(wait / 60), wait % 60) or "now"))
         Print("  Last finished scan: " .. (t and (PC:Ago(time() - t) .. " ago") or "never"))
-        Print(("  Items with AH prices: %d   Vendor prices: %d   Recipes known: %d"):format(nPrices, nVendor, nRecipes))
-        Print("  Auto-scan on AH open: " .. (db.autoScan and yes or no))
+        Print(("  Items with auction prices: %d   Items vendors sell: %d   Recipes known: %d"):format(nPrices, nVendor, nRecipes))
+        Print("  Auto-scan when the Auction House opens: " .. (db.autoScan and yes or no))
     elseif msg == "help" then
         Print("/pc - show or hide the window")
         Print("/pc status - check that everything is working")
-        Print("/pc scan - check AH prices for your recipes (AH must be open)")
+        Print("/pc scan - check auction prices for your recipes (the Auction House must be open)")
         Print("/pc fullscan - download every auction (once per 15 minutes)")
         Print("/pc items - show every recipe item and whether it was scanned")
         Print("/pc pnl - show your profit and loss")
@@ -3721,15 +4568,15 @@ function PC:HandleSlash(msg)
         Print("/pc history - every purchase and sale")
         Print("/pc plan - your saved crafting plans; /pc plan <name> switches to (or creates) one")
         Print("/pc config - open ProfitCrafter's settings")
-        Print("/pc resetprices - forget all AH prices and start fresh")
+        Print("/pc resetprices - forget all auction prices and start fresh")
         Print("/pc icon - pick the addon's icon")
         Print("/pc minimap - show or hide the minimap button")
         Print("/pc layout - task list above the Task Button, or pull-down (button on top, list below)")
         Print("/pc where - where the route thinks you are, and every step of the way")
         Print("/pc arrow why - what the arrow points at, and why that way")
-        Print("/pc ahtab - open ProfitCrafter automatically with the AH, on or off")
+        Print("/pc ahtab - open ProfitCrafter automatically with the Auction House, on or off")
         if not PC.FOREVER then Print("/pc share - who you've traded prices with; /pc share on|off turns sharing on or off") end
-        Print("/pc auto - turn auto-scan on AH open on or off")
+        Print("/pc auto - auto-scan when the Auction House opens, on or off")
         Print("/pc reset - forget recipes and relearn them")
     else
         if PC.UI then PC.UI:Toggle() end

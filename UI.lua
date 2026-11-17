@@ -13,15 +13,17 @@ local UI = {
     tab = 1,
     offset = 0,
     itemOffset = 0,
-    sortKey = "profit",
-    sortDir = -1,
     category = "ALL",
     search = "",
     pnlRange = 7,
 }
 PC.UI = UI
 
-local W, H = 780, 560
+local W, H = 966, 560             -- (with the page list: 1150 wide, room for every column of the Recipes table)
+local PW = W - 24                  -- a page's panels and tables: 12 in from each side
+local RW = PW - 8                  -- a table's rows: 4 in from the panel's edges
+local HEAD_H = 30                  -- column headers: two lines of small lettering
+local LIST_Y = -(HEAD_H + 6)       -- where a table's rows start, under its header and the line below it
 local NAV_W = 184                 -- the page list down the left side (the clean look)
 UI.navW = 0
 local TICKER_H = 20                -- price ticker strip under the title bar; everything below sits this much lower
@@ -59,7 +61,7 @@ local DIFF_COLORS = { [0] = "ff8040", [1] = "ffff00", [2] = "40c040", [3] = "a0a
 
 local STATUS_TEXT = {
     [1] = "|cffff5555Not scanned|r",
-    [2] = "|cffff8040Not on AH|r",
+    [2] = "|cffff8040Not at auction|r",
     [3] = "|cff40ff40Priced|r",
     [4] = "|cff40c0ffAuctionator|r",
 }
@@ -235,6 +237,36 @@ local function RowText(row, x, width, justify)
     return fs
 end
 
+-- How wide a font string's text is, whatever width the string is held to (GetStringWidth can stop there)
+local function TextWidth(fs)
+    return (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth()) or fs:GetStringWidth() or 0
+end
+
+-- A cell's text in the row's big lettering, or the small one when it wouldn't fit: money is never cut short
+-- (a sum of money with gold in it, shortened: the copper left off, then the silver; the tooltips keep it exact)
+local COPPER_PART = "%s*%d+|TInterface\\MoneyFrame\\UI%-CopperIcon[^|]*|t"
+local SILVER_PART = "%s*%d+|TInterface\\MoneyFrame\\UI%-SilverIcon[^|]*|t"
+local function Shorter(text, part)
+    if not (text and text:find("UI%-GoldIcon")) then return nil end
+    local s, n = text:gsub(part, "")
+    return n > 0 and s or nil
+end
+local function FitCell(fs, text)
+    fs:SetText(text or "")
+    if not fs.bigFont then return end
+    if fs.isSmall then fs:SetFontObject(fs.bigFont); fs.isSmall = false end
+    local room = fs:GetWidth() or 0
+    if TextWidth(fs) <= room then return end
+    fs:SetFontObject("GameFontHighlightSmall"); fs.isSmall = true
+    -- still too wide (a big sum): drop the copper, then the silver, rather than cut it off
+    for _, part in ipairs({ COPPER_PART, SILVER_PART }) do
+        if TextWidth(fs) <= room then return end
+        local s = Shorter(fs:GetText(), part)
+        if not s then return end
+        fs:SetText(s)
+    end
+end
+
 -- Dark inset box with a bronze border, like the Auction House lists
 local function Panel(parent, x, y, w, h)
     local p = CreateFrame("Frame", nil, parent, "BackdropTemplate")
@@ -342,11 +374,11 @@ UI.StatStrip = StatStrip
 local function HeaderStrip(panel, width)
     local strip = panel:CreateTexture(nil, "ARTWORK")
     strip:SetPoint("TOPLEFT", 4, -4)
-    strip:SetSize(width, 21)
+    strip:SetSize(width or RW, HEAD_H)
     strip:SetColorTexture(unpack(T.header))
     local line = panel:CreateTexture(nil, "ARTWORK", nil, 1)
-    line:SetPoint("TOPLEFT", 4, -25)
-    line:SetSize(width, 1)
+    line:SetPoint("TOPLEFT", 4, -(4 + HEAD_H))
+    line:SetSize(width or RW, 1)
     line:SetColorTexture(unpack(T.headerLine))
 end
 
@@ -421,27 +453,83 @@ end
 
 local ShowTooltip -- defined below; the column headers use it on hover
 
--- Column header; clicking sorts when a key is given
-local function HeaderButton(parent, x, w, label, key, justify, desc)
+---------------------------------------------------------------------------
+-- Sortable tables. Every table's column headers are the same: two lines high, the label word-wrapped
+-- inside its column and right-aligned, the sort arrow in its own room just left of the label (never
+-- over it). Click sorts by that column, click again reverses. Each table keeps its sort (PC.db.sorts).
+---------------------------------------------------------------------------
+-- where each table starts: names A-Z, numbers biggest first; nil = the order it comes in
+UI.SORT_DEFAULTS = { recipes = { "profit", -1 }, plan = { "name", 1 }, items = { "status", 1 }, history = { "t", -1 }, recent = { "t", -1 } }
+-- the scroll position that goes back to the top when a table's sort changes
+local SORT_OFFSET = { recipes = "offset", plan = "planOffset", mats = "shopOffset", items = "itemOffset",
+    sell = "sellOffset", learn = "learnOffset", history = "historyOffset" }
+local SORT_MEDIA = "Interface\\AddOns\\" .. ADDON .. "\\Media\\"
+local ARROW = 10
+
+function UI:SortState(tbl)
+    local all = PC.db and PC.db.sorts
+    if PC.db and not all then all = {}; PC.db.sorts = all end
+    all = all or {}
+    local s = all[tbl]
+    if not s then
+        local d = self.SORT_DEFAULTS[tbl] or {}
+        s = { key = d[1], dir = d[2] or -1 }
+        all[tbl] = s
+    end
+    return s
+end
+
+function UI:SortBy(tbl, key, first)
+    local s = self:SortState(tbl)
+    if s.key == key then s.dir = -s.dir else s.key, s.dir = key, first or -1 end
+    s.auto = nil -- picked by you (not by a Recipes category)
+    if SORT_OFFSET[tbl] then self[SORT_OFFSET[tbl]] = 0 end
+    self:Redraw()
+end
+
+-- Sort rows by one column: get(row, key) gives each row's value (worked out once per row). Rows with no
+-- value always go last, ties go by name (nameOf), then by where they were.
+function UI.SortRows(data, key, dir, get, nameOf)
+    if not key then return data end
+    local val, name, pos = {}, {}, {}
+    for i, e in ipairs(data) do
+        local v = get(e, key)
+        if v ~= v then v = nil end -- (0/0 from a missing price: no value, or the sort would break)
+        val[e], name[e], pos[e] = v, nameOf(e) or "", i
+    end
+    table.sort(data, function(a, b)
+        local x, y = val[a], val[b]
+        if x == nil or y == nil then
+            if x ~= nil then return true end
+            if y ~= nil then return false end
+        elseif x ~= y then
+            if dir > 0 then return x < y end
+            return x > y
+        end
+        if name[a] ~= name[b] then return name[a] < name[b] end
+        return pos[a] < pos[b]
+    end)
+    return data
+end
+
+local function Header(parent, x, w, label, key, desc, tbl, first)
     local b = CreateFrame("Button", nil, parent)
     b:SetPoint("TOPLEFT", x, -4)
-    b:SetSize(w, 21)
-    b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    if justify == "RIGHT" then
-        b.text:SetPoint("RIGHT", -6, 0)
-    else
-        b.text:SetPoint("LEFT", 6, 0)
-    end
-    b.text:SetText(label)
-    b.label, b.key = label, key
-    -- sort arrow sits on the empty side of the header, so it never pushes into the next column
+    b:SetSize(w, HEAD_H)
+    b.label, b.key, b.tbl, b.first = label, key, tbl, first
+    local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    fs:SetPoint("TOPRIGHT", -4, 0)
+    fs:SetPoint("BOTTOMRIGHT", -4, 0)
+    fs:SetWidth(math.max(w - 8 - ARROW, 8)) -- the arrow's room (and a gap) stays clear on the left
+    fs:SetJustifyH("RIGHT")
+    if fs.SetJustifyV then fs:SetJustifyV("MIDDLE") end
+    fs:SetWordWrap(true)
+    if fs.SetNonSpaceWrap then fs:SetNonSpaceWrap(false) end
+    if fs.SetMaxLines then fs:SetMaxLines(2) end
+    fs:SetText(label or "")
+    b.text = fs
     b.arrow = b:CreateTexture(nil, "OVERLAY")
-    b.arrow:SetSize(10, 10)
-    if justify == "RIGHT" then
-        b.arrow:SetPoint("RIGHT", b.text, "LEFT", -2, 0)
-    else
-        b.arrow:SetPoint("LEFT", b.text, "RIGHT", 3, 0)
-    end
+    b.arrow:SetSize(ARROW, ARROW)
     b.arrow:Hide()
     b.active = b:CreateTexture(nil, "ARTWORK")
     b.active:SetPoint("BOTTOMLEFT", 2, 0)
@@ -454,23 +542,54 @@ local function HeaderButton(parent, x, w, label, key, justify, desc)
         hl:SetAllPoints()
         hl:SetColorTexture(1, 1, 1, 0.08)
         b:SetScript("OnEnter", function(btn)
-            ShowTooltip(btn, desc and { label, desc, "|cff888888Click to sort, click again to flip.|r" }
-                or { "Sort by " .. label, "Click again to flip the order." })
+            local tip = { label }
+            if desc then tip[#tip + 1] = desc end
+            tip[#tip + 1] = "|cff888888Click to sort, click again to reverse.|r"
+            ShowTooltip(btn, tip)
         end)
         b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        b:SetScript("OnClick", function()
-            if UI.sortKey == key then
-                UI.sortDir = -UI.sortDir
-            else
-                UI.sortKey = key
-                -- A-Z for names, most recent first for Last sold, biggest first for the rest
-                UI.sortDir = (key == "name" or key == "lastSold") and 1 or -1
-            end
-            UI.offset = 0
-            UI:Refresh()
-        end)
+        b:SetScript("OnClick", function(btn) UI:SortBy(btn.tbl, btn.key, btn.first) end)
     end
     return b
+end
+
+-- A table's columns, left to right: { key, label, width, tooltip, text = true (A-Z first) }. The one
+-- column with no width takes the room the others leave; a column with no label is just room (buttons).
+-- Makes the headers, and gives every column its x and width (cols.by[key] finds one).
+local function Columns(panel, cols, tbl, width)
+    local used = 0
+    for _, c in ipairs(cols) do used = used + (c[3] or 0) end
+    local x, heads = 0, {}
+    cols.by = {}
+    for _, c in ipairs(cols) do
+        c.x, c.w = x, c[3] or ((width or RW) - used)
+        x = x + c.w
+        if c[1] then cols.by[c[1]] = c end
+        if c[2] then heads[#heads + 1] = Header(panel, 4 + c.x, c.w, c[2], c[1], c[4], tbl, c.text and 1 or -1) end
+    end
+    return heads
+end
+
+-- Mark the column a table is sorted by: its arrow (just left of the label) and the gold line under it
+function UI:PaintHeaders(heads, tbl)
+    local s = self:SortState(tbl)
+    for _, h in ipairs(heads or {}) do
+        local on = h.key ~= nil and h.key == s.key
+        if on then
+            local fs = h.text
+            local room, full = fs:GetWidth() or 0, TextWidth(fs)
+            local lw = math.min(full, room)
+            if full > room and fs.GetWrappedWidth then lw = math.min(fs:GetWrappedWidth() or room, room) end -- (two lines)
+            h.arrow:ClearAllPoints()
+            h.arrow:SetPoint("RIGHT", h, "RIGHT", -(4 + lw + 2), 0)
+            h.arrow:SetTexture(SORT_MEDIA .. (s.dir > 0 and "SortUp" or "SortDown"))
+            fs:SetTextColor(1, 1, 1)
+        else
+            h.text:SetTextColor(1, 0.82, 0)
+        end
+        h.arrow:SetShown(on)
+        h.active:SetShown(on)
+    end
 end
 
 local function Stripe(row, index)
@@ -488,7 +607,7 @@ local function ItemIcon(itemID)
     return icon or QUESTION
 end
 
-local CLICK_HINT = "|cff888888Shift-click: search the AH   Right-click: craft it   Shift-right-click: link in chat|r"
+local CLICK_HINT = "|cff888888Shift-click: search the Auction House   Right-click: craft it   Shift-right-click: link in chat|r"
 
 -- Tooltip: the game's own item tooltip (when we know the item), then ProfitCrafter's lines
 -- Which expansion an item comes from (the game's own names when it has them)
@@ -736,6 +855,31 @@ local function ShopButton(parent, size)
 end
 UI.ShopButton = ShopButton
 
+-- Quick Buy: the crafts that make your minimum profit go in the plan, the main AH material is bought
+-- in the same click, and the plan opens for the rest
+local function QuickButton(parent, size)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(size, size)
+    b.tex = b:CreateTexture(nil, "ARTWORK")
+    b.tex:SetAllPoints()
+    b.tex:SetTexture("Interface\\Icons\\INV_Misc_Coin_02")
+    b.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    local hl = b:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 1, 1, 0.25)
+    b:SetScript("OnClick", function(btn)
+        local e = btn.getEntry and btn.getEntry()
+        if e then PC:Safe("quick buy", UI.QuickBuy, UI, e) end
+    end)
+    b:SetScript("OnEnter", function(btn)
+        ShowTooltip(btn, { "Quick Buy", ("Plans as many crafts as clear your %d%% minimum profit (within your gold and bags), buys the main auction material and opens the plan. Buy the other materials there."):format(PC:MinProfitPct()),
+            "|cff888888Nothing is bought if the price no longer pays.|r" })
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return b
+end
+UI.QuickButton = QuickButton
+
 
 -- A clickable item link for an item ID
 function UI:ItemLink(itemID)
@@ -830,6 +974,9 @@ function UI:Create()
     end
     self.navW = NAV
     UI.W = W + NAV
+    -- the Recipes list opens on All professions: a sort Best bets or Vendor flips picked doesn't carry over
+    local rs = self:SortState("recipes")
+    if rs.auto then rs.key, rs.dir, rs.auto = "profit", -1, nil end
 
     local usePortrait = HasTemplate("PortraitFrameTemplate")
     local f = CreateFrame("Frame", "ProfitCrafterFrame", UIParent,
@@ -892,7 +1039,7 @@ function UI:Create()
     search:HookScript("OnTextChanged", function(sb)
         UI.search = strtrim((sb:GetText() or ""):lower())
         UI.offset = 0
-        UI:Refresh()
+        UI:Redraw()
     end)
     search:HookScript("OnEnterPressed", search.ClearFocus)
     f.search = search
@@ -903,21 +1050,45 @@ function UI:Create()
     cb:SetScript("OnClick", function(btn)
         PC.db.onlyProfit = btn:GetChecked() and true or false
         UI.offset = 0
-        UI:Refresh()
+        UI:Redraw()
     end)
+    cb:SetScript("OnEnter", function(btn)
+        ShowTooltip(btn, { btn.label or "Only Auction profit", ("Only recipes making at least %s%% Auction Profit, after the 5%% auction cut."):format(PC:MinProfitPct()),
+            "With Vendor profit ticked too, a recipe must meet both. Ignored in Best bets and Vendor flips. Set the minimum in Settings." })
+    end)
+    cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
     local cbText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     cbText:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-    cbText:SetText("Only profitable"); UI.Ink(cbText)
-    f.onlyProfit = cb
+    cbText:SetText("Only Auction profit"); UI.Ink(cbText) -- (shows the minimum once the window draws)
+    f.onlyProfit, f.onlyProfitText = cb, cbText
+
+    -- the same for V Profit (what a vendor pays you, less the materials)
+    local cbV = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    cbV:SetSize(22, 22)
+    cbV:SetPoint("LEFT", cbText, "RIGHT", 10, 0)
+    cbV:SetScript("OnClick", function(btn)
+        PC.db.onlyVProfit = btn:GetChecked() and true or false
+        UI.offset = 0
+        UI:Redraw()
+    end)
+    cbV:SetScript("OnEnter", function(btn)
+        ShowTooltip(btn, { btn.label or "Only Vendor profit", ("Only recipes making at least %s%% Vendor Profit, selling to a vendor."):format(PC:MinProfitPct()),
+            "With Auction profit ticked too, a recipe must meet both. Ignored in Best bets. Set the minimum in Settings." })
+    end)
+    cbV:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local cbVText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    cbVText:SetPoint("LEFT", cbV, "RIGHT", 2, 0)
+    cbVText:SetText("Only Vendor profit"); UI.Ink(cbVText)
+    f.onlyVProfit, f.onlyVProfitText = cbV, cbVText
 
     -- Only recipes your gold (or the amount you set on Levels & gold) can pay the materials for
     local cb2 = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     cb2:SetSize(22, 22)
-    cb2:SetPoint("LEFT", cbText, "RIGHT", 10, 0)
+    cb2:SetPoint("LEFT", cbVText, "RIGHT", 10, 0)
     cb2:SetScript("OnClick", function(btn)
         PC.db.onlyAffordable = btn:GetChecked() and true or false
         UI.offset = 0
-        UI:Refresh()
+        UI:Redraw()
     end)
     cb2:SetScript("OnEnter", function(btn)
         ShowTooltip(btn, { "Can afford", "Only show recipes whose materials you can pay for right now (one craft),",
@@ -929,11 +1100,11 @@ function UI:Create()
     cb2Text:SetText("Can afford"); UI.Ink(cb2Text)
     f.onlyAfford = cb2
 
-    f.status = UI.Ink(Text(f, "GameFontHighlightSmall", 528 + NAV, -37 - TICKER_H, 240, "RIGHT"), true)
+    f.status = UI.Ink(Text(f, "GameFontHighlightSmall", W - 12 - 300 + NAV, -37 - TICKER_H, 300, "RIGHT"), true)
 
     local bar = CreateFrame("StatusBar", nil, f)
-    bar:SetPoint("TOPLEFT", 528 + NAV, -33 - TICKER_H)
-    bar:SetSize(240, 18)
+    bar:SetPoint("TOPLEFT", W - 12 - 300 + NAV, -33 - TICKER_H)
+    bar:SetSize(300, 18)
     bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
     bar:SetMinMaxValues(0, 1)
     bar.bg = bar:CreateTexture(nil, "BACKGROUND")
@@ -1044,7 +1215,7 @@ function UI:Create()
     local scan = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     scan:SetSize(120, 22)
     scan:SetPoint("BOTTOMRIGHT", -10, 9)
-    scan:SetText("Scan AH")
+    scan:SetText("Scan auctions")
     scan:SetScript("OnClick", function() PC:StartScan() end)
     f.scanBtn = scan
 
@@ -1402,7 +1573,7 @@ function UI:CreateNav(f)
         if old then old:SetAlpha(0); old:EnableMouse(false) end
     end
     -- with those buttons gone, the plan's totals line gets the whole width (it was cut off)
-    if self.shopSummary then self.shopSummary:SetWidth(740) end
+    if self.shopSummary then self.shopSummary:SetWidth(PW - 8) end
     -- Clear Plan joins New / Rename / Delete at the top of the Crafting plan page
     if self.shopClear and self.planDelete then
         self.shopClear:ClearAllPoints()
@@ -1664,7 +1835,7 @@ function UI:ShowTab(n)
         self.f.search.Instructions:SetText(n == 5 and "Search history" or "Search recipes")
     end
     if self.UpdateNav then self:UpdateNav() end
-    self:Refresh()
+    self:Redraw()
 end
 
 -- Simple mode: Make me gold, Plan, Recipes and Settings (at the bottom) show; a page it hides isn't opened by itself
@@ -1748,11 +1919,21 @@ function UI:UpdateLimit(force)
 end
 
 function UI:Refresh()
-    local ok, err = pcall(self.DoRefresh, self)
+    -- (one shared memo for the whole redraw, also when a click redraws straight away: prices, ladders
+    -- and the shopping list are worked out once, not once per table)
+    local ok, err = pcall(PC.WithMemo, PC, self.DoRefresh, self)
     if not ok and err ~= self.lastError then
         self.lastError = err
         PC.Print("|cffff5555Something went wrong drawing the window. Please send this to whoever made the addon:|r " .. tostring(err))
     end
+end
+
+-- Sorting, searching, a filter, another tab: the same recipes drawn again, nothing worked out again
+-- (working every recipe out again was most of the time a redraw took)
+function UI:Redraw()
+    self.reuse = self.allEntries ~= nil
+    self:Refresh()
+    self.reuse = nil
 end
 
 function UI:DoRefresh()
@@ -1773,6 +1954,11 @@ function UI:DoRefresh()
     f.money:SetText(PC:Money(GetMoney()))
     self:UpdateLimit()
     f.onlyProfit:SetChecked(PC.db.onlyProfit)
+    f.onlyProfit.label = ("Only %s%%+ Auction profit"):format(PC:MinProfitPct()) -- follows the minimum in Settings
+    f.onlyProfitText:SetText(f.onlyProfit.label)
+    f.onlyVProfit:SetChecked(PC.db.onlyVProfit and true or false)
+    f.onlyVProfit.label = ("Only %s%%+ Vendor profit"):format(PC:MinProfitPct())
+    f.onlyVProfitText:SetText(f.onlyVProfit.label)
     f.onlyAfford:SetChecked(PC.db.onlyAffordable ~= false)
 
     -- Status line (hidden behind the progress bar while scanning)
@@ -1785,15 +1971,17 @@ function UI:DoRefresh()
     elseif t then
         status = ("Prices from %s ago"):format(PC:Ago(time() - t))
     else
-        status = "|cffff8040No prices yet: open the AH and scan|r"
+        status = "|cffff8040No prices yet: open the Auction House and scan|r"
     end
     f.status:SetText(status)
 
     f.scanBtn:SetEnabled(PC.ahOpen and not PC.scanning)
-    if not PC.scanning then f.scanBtn:SetText("Scan AH") end
+    if not PC.scanning then f.scanBtn:SetText("Scan auctions") end
 
-    self.allEntries = PC:Analyze()
-    self.analyzedAt = GetTime and GetTime() or 0
+    if not (self.reuse and self.allEntries) then
+        self.allEntries = PC:Analyze()
+        self.analyzedAt = GetTime and GetTime() or 0
+    end
 
     if self.tab == 1 then self:UpdateRecipes()
     elseif self.tab == 2 then self:UpdateShopping()
@@ -1873,11 +2061,77 @@ end
 ---------------------------------------------------------------------------
 -- Tab 1: Recipes
 ---------------------------------------------------------------------------
+UI.ROUTE_TEXT = { AH = "selling at auction", Vendor = "selling to a vendor", Disenchant = "disenchanting it" }
+-- what stops the Craftable at Profit count
+UI.CRAFT_WHY = { gold = "your gold or spending limit, deposits included", market = "Auction listings run out",
+    profit = "the next craft would lose money", max = "the plan limit", bags = "bag space" }
+
+-- Tooltip lines: how many you can craft at a profit, what stops it there, and each way's total
+function UI:CraftableLines(e)
+    local n, worth, spend, tAH, tV, why, est, nAH, nV = PC:Craftable(e)
+    if not n then return { " ", "Craftable at Profit: |cff888888n/a (a price is missing)|r" } end
+    if e.ahFlip and not self.CRAFT_WHY_FLIP then
+        self.CRAFT_WHY_FLIP = { gold = "your gold or spending limit", market = "listings run out",
+            profit = "the next listing costs as much as a vendor pays", max = "the plan limit", bags = "bag space" }
+    end
+    local whyText = e.ahFlip and self.CRAFT_WHY_FLIP or self.CRAFT_WHY
+    local out = { " ", ("%s: |cffffffff%d|r%s"):format(e.ahFlip and "To buy at a profit" or "Craftable at Profit", n,
+        why and ("  |cff888888(stops at: " .. (whyText[why] or why) .. ")|r") or "") }
+    local unit = e.ahFlip and "bought" or "craft"
+    local function way(label, t, k)
+        if t == nil then return ("%s: |cff888888n/a|r"):format(label) end
+        if (k or 0) <= 0 then
+            local m = math.max(n, 1)
+            return ("%s: %s  |cffff8040(no profit this way: the loss on %d %s%s)|r"):format(label, PC:Money(t, true), m, unit, m == 1 and "" or "s")
+        end
+        return ("%s: %s  |cff888888(%d %s%s)|r"):format(label, PC:Money(t, true), k, unit, k == 1 and "" or "s")
+    end
+    out[#out + 1] = way("Total Auction Profit", tAH, nAH)
+    out[#out + 1] = way("Total Vendor Profit", tV, nV)
+    if n > 0 then
+        out[#out + 1] = ("|cff888888All %d: materials worth %s, %s still to buy, at live listing prices.|r"):format(n, PC:Money(worth), PC:Money(spend))
+    end
+    -- what buying will really do: it stops before a craft would make less than the minimum profit
+    local m, _, _, mwhy = PC:BuyCrafts(e)
+    local pct = PC:MinProfitPct()
+    if m and m < n and mwhy == "profit" then
+        out[#out + 1] = m == 0 and ("|cffff8040At your %d%% minimum profit: none, so nothing is bought for it.|r"):format(pct)
+            or ("|cffff8040At your %d%% minimum profit: %d. Buying stops there.|r"):format(pct, m)
+    end
+    if est then out[#out + 1] = "|cffffd100~ Estimate: a material has no live listings, so its last cheapest price is used.|r" end
+    return out
+end
+
+-- A recipe's ingredients for one craft and what each costs (the way it's priced): a tooltip paragraph
+UI.SRC_TEXT = { AH = "Auction House, cheapest listing", Vendor = "what a vendor charges, after Bartering", Craft = "cheaper to make yourself",
+    Disenchant = "disenchanting a crafted green (an estimate: yields vary)" }
+function UI:IngredientLines(r, mats)
+    local out = { " ", "|cffffd100Ingredients for one craft:|r" }
+    local total, missing = 0, false
+    for _, rg in ipairs(r and r.reagents or {}) do
+        local id, unit, src = PC:ReagentFor(rg, mats)
+        local n = rg.n or 1
+        local qty = n % 1 == 0 and tostring(n) or ("%.1f"):format(n)
+        local name = (id and PC:ItemName(id)) or "?"
+        local have = PC:ReagentCount(rg)
+        if unit then
+            total = total + unit * n
+            out[#out + 1] = ("  %s x %s: %s each = |cffffffff%s|r  |cff888888(%s; you have %d)|r"):format(qty, name,
+                PC:Money(unit), PC:Money(unit * n), self.SRC_TEXT[src] or src or "?", have)
+        else
+            missing = true
+            out[#out + 1] = ("  %s x %s: |cffff5555no price yet|r  |cff888888(you have %d)|r"):format(qty, name, have)
+        end
+    end
+    out[#out + 1] = ("  Total: |cffffffff%s|r%s"):format(PC:Money(total), missing and " |cffff5555+ the unpriced ones|r" or "")
+    return out
+end
+
 function UI:CreateRecipesPage(p)
     -- Professions in a row across the top (placed in UpdateRecipes, each as wide as its name)
     local cat = CreateFrame("Frame", nil, p)
     cat:SetPoint("TOPLEFT", 12, -60)
-    cat:SetSize(756, 28)
+    cat:SetSize(PW, 28)
     self.catBar = cat
     self.catButtons = {}
     for i = 1, 9 do
@@ -1900,34 +2154,43 @@ function UI:CreateRecipesPage(p)
         b:SetScript("OnClick", function(btn)
             UI.category = btn.value
             UI.offset = 0
+            local s = UI:SortState("recipes")
             if btn.value == "BEST" then
-                UI.sortKey, UI.sortDir = "score", -1          -- best bets start in "most likely gold" order
+                s.key, s.dir, s.auto = "score", -1, true          -- best bets start in "most likely gold" order
             elseif btn.value == "VENDOR" then
-                UI.sortKey, UI.sortDir = "vendorProfit", -1   -- vendor flips start biggest first
-            elseif UI.sortKey == "score" or UI.sortKey == "vendorProfit" then
-                UI.sortKey, UI.sortDir = "profit", -1
+                s.key, s.dir, s.auto = "vendorProfit", -1, true   -- vendor flips start biggest V Profit first
+            elseif s.auto then
+                s.key, s.dir, s.auto = "profit", -1, nil          -- (a sort you picked yourself stays)
             end
-            UI:Refresh()
+            UI:Redraw()
         end)
         b:Hide()
         self.catButtons[i] = b
     end
     -- Sortable recipe list, the full width of the page
-    local lp = Panel(p, 12, -92, 756, 380)
-    HeaderStrip(lp, 748)
-    self.recipeHeaders = {
-        HeaderButton(lp, 4, 316, "Name", "name"),
-        HeaderButton(lp, 324, 72, "Mats", "cost", "RIGHT", "Materials cost per craft"),
-        HeaderButton(lp, 396, 82, "Sells for", "sell", "RIGHT", "What one craft sells for (all the items it makes)"),
-        HeaderButton(lp, 478, 82, "Profit", "profit", "RIGHT", "Profit per craft, after the AH's 5% cut"),
-        HeaderButton(lp, 560, 62, "Profit %", "profitPct", "RIGHT", "Profit divided by the materials cost"),
-        HeaderButton(lp, 622, 52, "Listed", "listed", "RIGHT", "How many are for sale on the AH right now"),
-        HeaderButton(lp, 674, 74, "Sold today", "soldToday", "RIGHT", "How many sold since midnight (0 if unknown)"),
+    local lp = Panel(p, 12, -92, PW, 380)
+    HeaderStrip(lp)
+    local cols = {
+        { "name", "Name", nil, "The arrows show the chance of a skill-up.", text = true },
+        { "cost", "Mats", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one." },
+        { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing." },
+        { "vendorSell", "Sells to vendor for", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it)." },
+        { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut." },
+        { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor." },
+        { "profitPct", "Profit %", 48, "Profit as a % of material cost, for how it's sold (auction, vendor or disenchanting)." },
+        { "listed", "Listed", 52, "How many are at auction now." },
+        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction." },
+        { "craftable", "Craftable at Profit", 64, "How many you can craft at a profit (auction or vendor) with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. The recipe's tooltip says how many clear your minimum profit, where buying stops. ~ = a material has no live listings." },
+        { "totalAH", "Total Auction Profit", 84, "Auction Profit for every craft that still profits at auction, the whole batch at live listing prices." },
+        { "totalV", "Total Vendor Profit", 84, "Vendor Profit for every craft that still profits selling to a vendor, priced the same way." },
     }
+    self.recipeCols = cols
+    self.recipeHeaders = Columns(lp, cols, "recipes")
+    local C = cols.by
 
     local list = CreateFrame("Frame", nil, lp)
-    list:SetPoint("TOPLEFT", 4, -28)
-    list:SetSize(748, RECIPE_ROWS * ROW_H)
+    list:SetPoint("TOPLEFT", 4, LIST_Y)
+    list:SetSize(RW, RECIPE_ROWS * ROW_H)
     list:EnableMouseWheel(true)
     list:SetScript("OnMouseWheel", function(_, delta)
         UI.offset = UI.offset - delta * 3
@@ -1936,12 +2199,12 @@ function UI:CreateRecipesPage(p)
 
     self.recipeEmpty = list:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     self.recipeEmpty:SetPoint("CENTER")
-    self.recipeEmpty:SetWidth(460)
+    self.recipeEmpty:SetWidth(560)
 
     self.recipeRows = {}
     for i = 1, RECIPE_ROWS do
         local row = CreateFrame("Button", nil, list)
-        row:SetSize(748, ROW_H)
+        row:SetSize(RW, ROW_H)
         row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
         Stripe(row, i)
         row.sel = row:CreateTexture(nil, "BORDER")
@@ -1968,30 +2231,46 @@ function UI:CreateRecipesPage(p)
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
         SkillArrows(row, 30)
-        row.name = RowText(row, 46, 244)
+        row.name = RowText(row, 46, C.name.w - 46 - 48)
         row.shop = ShopButton(row, 18)
-        row.shop:SetPoint("LEFT", 296, 0)
+        row.shop:SetPoint("LEFT", C.name.w - 22, 0)
         row.shop.getEntries = function() return row.entry and { row.entry } or {} end
-        row.cost = RowText(row, 320, 72, "RIGHT")
-        row.sell = RowText(row, 392, 82, "RIGHT")
-        row.profit = RowText(row, 474, 82, "RIGHT")
-        row.pct = RowText(row, 556, 62, "RIGHT")
-        row.listed = RowText(row, 618, 52, "RIGHT")
-        row.lastSold = RowText(row, 618, 52, "RIGHT") -- (column removed; kept for the tooltip text only)
-        row.lastSold:Hide()
-        row.soldToday = RowText(row, 670, 74, "RIGHT")
-        -- larger lettering to go with the taller rows
-        for _, fs in ipairs({ row.name, row.cost, row.sell, row.profit, row.pct, row.listed, row.soldToday }) do
+        row.quick = QuickButton(row, 18)
+        row.quick:SetPoint("RIGHT", row.shop, "LEFT", -4, 0)
+        row.quick.getEntry = function() return row.entry end
+        -- larger lettering to go with the taller rows (a value too wide for it gets the small one)
+        row.name:SetFontObject("GameFontHighlight")
+        row.name.bigFont = "GameFontHighlight"
+        row.cell = {}
+        for i2 = 2, #cols do
+            local c = cols[i2]
+            local fs = RowText(row, c.x, c.w - 4, "RIGHT")
             fs:SetFontObject("GameFontHighlight")
+            fs.bigFont = "GameFontHighlight"
+            row.cell[c[1]] = fs
         end
         row:SetScript("OnEnter", function(btn)
             local e = btn.entry
             if not e then return end
             if e.ahFlip then
-                ShowTooltip(btn, { e.r.name .. "  |cff40c0ff(AH flip)|r",
-                    ("On the AH for %s; any vendor pays %s each."):format(PC:Money(e.cost), PC:Money(e.sell)),
-                    ("Profit %s each, no crafting."):format(PC:Money(e.profit, true)),
-                    "|cff888888Click (at the AH): buy the ones listed below what a vendor pays. They're sold at your next vendor.|r" }, e.ahFlipID)
+                local sure = PC.db.vendorPaid and PC.db.vendorPaid[e.ahFlipID]
+                local tip = { e.r.name .. "  |cff40c0ff(auction flip)|r",
+                    "|cff40c0ffNot a craft:|r bought at auction and sold to any vendor for more.",
+                    " ",
+                    ("Cheapest at auction: %s each |cff888888(the Mats column)|r"):format(PC:Money(e.cost)),
+                    ("A vendor pays: %s each%s"):format(PC:Money(e.sell), sure and " |cff888888(confirmed)|r"
+                        or " |cffff8040(not confirmed yet: sell one to a vendor to confirm it)|r"),
+                    ("Vendor Profit each: %s (%d%%)"):format(PC:Money(e.vendorProfit, true), math.floor((e.vendorProfitPct or 0) + 0.5)),
+                    ("Auction Profit each: %s |cff888888(relisting it, after the 5%% auction cut)|r"):format(PC:Money(e.ahProfit, true)),
+                }
+                for _, l in ipairs(UI:CraftableLines(e)) do tip[#tip + 1] = l end
+                tip[#tip + 1] = ("Sold today: |cffffffff%d|r%s"):format(e.soldToday or 0, e.soldTodayKnown and "" or " |cff888888(not scanned today)|r")
+                tip[#tip + 1] = " "
+                for _, line in ipairs(PC:SalesTooltip(e.ahFlipID)) do tip[#tip + 1] = line end
+                tip[#tip + 1] = " "
+                for _, l in ipairs(PC:DepthLines(e.ahFlipID)) do tip[#tip + 1] = l end
+                tip[#tip + 1] = "|cff888888Click at the Auction House to buy those listed below what a vendor pays. They're sold at your next vendor.|r"
+                ShowTooltip(btn, tip, e.ahFlipID)
                 return
             end
             local tip = { e.r.name }
@@ -2004,16 +2283,18 @@ function UI:CreateRecipesPage(p)
                     tip[#tip + 1] = "Sells for " .. PC:Money(e.sellEach) .. " (cheapest listing)."
                 end
             end
+            if e.vendorSell then tip[#tip + 1] = ("A vendor pays %s per craft."):format(PC:Money(e.vendorSell)) end
             if e.cost then tip[#tip + 1] = "Materials per craft: " .. PC:Money(e.cost) end
+            for _, l in ipairs(UI:IngredientLines(e.r, e.mats)) do tip[#tip + 1] = l end
             tip[#tip + 1] = " "
-            if e.ahProfit then tip[#tip + 1] = "Profit per craft on the AH: " .. PC:Money(e.ahProfit, true) .. " (after the 5% cut)" end
-            if e.vendorProfit then
-                local sure = PC.db.vendorPaid and PC.db.vendorPaid[e.outID or e.r.output]
-                tip[#tip + 1] = "Profit per craft selling to a vendor: " .. PC:Money(e.vendorProfit, true)
-                    .. (sure and "" or " |cffff8040(vendor price not confirmed: sell one to a vendor and ProfitCrafter learns what it really pays)|r")
-            end
+            tip[#tip + 1] = "Auction Profit per craft: " .. PC:Money(e.ahProfit, true)
+                .. (e.ahProfit and " (after the 5% auction cut)" or " |cff888888(no auction price, or it can't be listed)|r")
+            local sure = PC.db.vendorPaid and PC.db.vendorPaid[e.outID or e.r.output]
+            tip[#tip + 1] = "Vendor Profit per craft: " .. PC:Money(e.vendorProfit, true)
+                .. ((e.vendorProfit and not sure) and " |cffff8040(not confirmed yet: sell one to a vendor to confirm it)|r" or "")
+            if e.noSalesToday then tip[#tip + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
             if e.route == "Vendor" and e.profit and e.profit > 0 then
-                tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. Instant gold, no AH.|r"
+                tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. Instant gold, no auction.|r"
             end
             -- a green: what disenchanting it gives (and whether that beats selling it)
             local de = PC.Synergy and PC.Synergy:Describe(e.outID or e.r.output)
@@ -2023,9 +2304,9 @@ function UI:CreateRecipesPage(p)
                 if e.route == "Disenchant" then tip[#tip + 1] = "|cffc080ffBest: craft it and disenchant it; sell the dust.|r" end
             end
             if e.listed then
-                tip[#tip + 1] = ("%d already listed on the AH."):format(e.listed)
+                tip[#tip + 1] = ("%d already listed at auction."):format(e.listed)
             else
-                tip[#tip + 1] = "Number listed on the AH: not scanned yet."
+                tip[#tip + 1] = "Number listed at auction: not scanned yet."
             end
             if e.qualities then
                 tip[#tip + 1] = " "
@@ -2048,10 +2329,10 @@ function UI:CreateRecipesPage(p)
                 tip[#tip + 1] = "|cffffd100Worked out both ways (per craft):|r"
                 for _, w in ipairs({ { e.low, "Cheapest mats" }, { e.high, "Top-quality mats" } }) do
                     local d = w[1]
-                    tip[#tip + 1] = ("  %s: mats %s " .. PC.ARROW_R .. " Q%s sells %s, profit %s%s"):format(w[2],
+                    tip[#tip + 1] = ("  %s: mats %s " .. PC.ARROW_R .. " Q%s sells %s, Auction Profit %s, Vendor Profit %s%s"):format(w[2],
                         d.cost and PC:Money(d.cost) or "?", tostring(d.qualityUsed or "?"),
                         d.sell and PC:Money(d.sell * (e.r.qty or 1)) or "?",
-                        d.profit and PC:Money(d.profit, true) or "|cff888888?|r",
+                        PC:Money(d.ahProfit, true), PC:Money(d.vendorProfit, true),
                         d.mode == e.mats and ("  " .. PC.ARROW_L .. " |cff40ff40used|r") or "")
                 end
                 tip[#tip + 1] = "|cff888888Top quality also depends on your skill.|r"
@@ -2059,21 +2340,23 @@ function UI:CreateRecipesPage(p)
                     or "|cff888888Using whichever makes more. Pick one on the Crafting plan tab.|r"
             end
             if e.profitPct then
-                tip[#tip + 1] = ("Profit %%: |cffffffff%d%%|r of what the materials cost."):format(math.floor(e.profitPct + 0.5))
+                tip[#tip + 1] = ("Profit %%: |cffffffff%d%%|r of material cost, %s."):format(math.floor(e.profitPct + 0.5),
+                    UI.ROUTE_TEXT[e.route] or "the way it's sold")
             end
+            for _, l in ipairs(UI:CraftableLines(e)) do tip[#tip + 1] = l end
             if e.lastSoldDays then
                 tip[#tip + 1] = "Last sold: " .. UI.DaysText(e.lastSoldDays, true)
-                    .. (e.lastSoldMine and " (your own sale)" or " (seen leaving the AH)")
+                    .. (e.lastSoldMine and " (your own sale)" or " (seen leaving the Auction House)")
             else
                 tip[#tip + 1] = "Last sold: |cff888888? not seen yet (scan a few times)|r"
             end
             tip[#tip + 1] = ("Sold today: |cffffffff%d|r%s"):format(e.soldToday or 0,
-                e.soldTodayKnown and "" or " |cff888888(no scans today yet, so 0)|r")
+                e.soldTodayKnown and "" or " |cff888888(not scanned today)|r")
             tip[#tip + 1] = " "
             for _, line in ipairs(PC:SalesTooltip(e.outID or e.r.output)) do tip[#tip + 1] = line end
             tip[#tip + 1] = " "
             for _, l in ipairs(PC:DepthLines(e.outID or e.r.output)) do tip[#tip + 1] = l end
-            tip[#tip + 1] = "|cff888888Click: select   Shift-click: search the AH   Right-click: craft it   Shift-right-click: link|r"
+            tip[#tip + 1] = "|cff888888Click: select   Shift-click: search the Auction House   Right-click: craft it   Shift-right-click: link|r"
             ShowTooltip(btn, tip, e.outID or e.r.output)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -2122,7 +2405,7 @@ function UI:CreateRecipesPage(p)
         self.recipeRows[i] = row
     end
 
-    self.recipeCount = Text(lp, "GameFontDisableSmall", 10, -358, 736)
+    self.recipeCount = Text(lp, "GameFontDisableSmall", 10, LIST_Y - RECIPE_ROWS * ROW_H - 8, RW - 12)
     self.recipeCount:SetWordWrap(false)
 end
 
@@ -2132,6 +2415,7 @@ end
 UI.AH_FLIP_MARGIN = 0.9
 function UI:AHFlips()
     local out = {}
+    local today = PC:SecondsToday()
     local prices, supply = PC:Prices(), PC:Supply()
     local sells = PC.db and PC.db.sellPrice or {}
     for id, sell in pairs(sells) do
@@ -2140,10 +2424,16 @@ function UI:AHFlips()
             local name = PC:ItemName(id)
             if name then
                 local n = supply[id]
+                -- (every column filled: listing it again on the AH would lose the cut, a vendor pays more)
+                local ahProfit = p * (1 - PC.AH_CUT) - p
+                local est = PC:SalesEstimate(id, today)
+                local mine = PC:MySales(name, today)
                 out[#out + 1] = { id = -id, ahFlipID = id, ahFlip = true, outID = id,
-                    r = { name = name, prof = "AH flip", output = id, reagents = {}, qty = 1 },
-                    cost = p, sell = sell, profit = sell - p, vendorProfit = sell - p,
-                    profitPct = (sell - p) / p * 100, route = "Vendor", listed = type(n) == "number" and n or nil }
+                    r = { name = name, prof = "Auction flip", output = id, reagents = {}, qty = 1 },
+                    cost = p, sell = sell, sellAH = p, vendorSell = sell, profit = sell - p, vendorProfit = sell - p,
+                    ahProfit = ahProfit, ahProfitPct = ahProfit / p * 100, vendorProfitPct = (sell - p) / p * 100,
+                    profitPct = (sell - p) / p * 100, route = "Vendor", listed = type(n) == "number" and n or nil,
+                    soldToday = math.max(est or 0, mine or 0), soldTodayKnown = est ~= nil or (mine or 0) > 0 }
             end
         end
     end
@@ -2169,7 +2459,7 @@ function UI:BuyAHFlip(e)
     else
         qty = math.max(e.listed or 1, 1)
     end
-    if qty <= 0 then return PC.Buy:Say(("|cffff8040No %s on the AH below what a vendor pays right now.|r"):format(e.r.name)) end
+    if qty <= 0 then return PC.Buy:Say(("|cffff8040No %s at auction below what a vendor pays right now.|r"):format(e.r.name)) end
     PC.Buy:Start({ id = id, name = e.r.name, qty = qty }, false)
 end
 
@@ -2232,8 +2522,8 @@ function UI:UpdateRecipes()
         return x - gap
     end
     -- still too wide with the short names (many professions): the buttons close up until the row fits
-    self.catShort = CatFlow(false) > 756
-    if self.catShort and CatFlow(true) > 756 and CatFlow(true, 12, 2) > 756 then CatFlow(true, 6, 0) end
+    self.catShort = CatFlow(false) > PW
+    if self.catShort and CatFlow(true) > PW and CatFlow(true, 12, 2) > PW then CatFlow(true, 6, 0) end
 
     for i, b in ipairs(self.catButtons) do
         local v = names[i]
@@ -2256,121 +2546,136 @@ function UI:UpdateRecipes()
         end
     end
 
-    -- Filter
+    -- Filter: "Only N%+ AH profit" and "Only N%+ V profit", each ticked box a condition (both ticked: both).
+    -- Vendor flips are judged the vendor way only (the AH box isn't used there).
     local data = {}
-    self.hiddenAfford = 0
+    local onlyAH, onlyV, minPct = PC.db.onlyProfit, PC.db.onlyVProfit, PC:MinProfitPct()
+    local vendorCat = self.category == "VENDOR"
+    local onlyMin = onlyV or (onlyAH and not vendorCat)
+    self.hiddenAfford, self.hiddenMin = 0, 0
     for _, e in ipairs(self.allEntries) do
-        local keep
+        local keep, meets
         if self.category == "BEST" then
-            keep = e.score ~= nil
-        elseif self.category == "VENDOR" then
+            keep, meets = e.score ~= nil, true
+        elseif vendorCat then
             keep = e.vendorProfit and e.vendorProfit > 0
+            meets = not onlyV or PC:MeetsMinV(e)
         else
             keep = (self.category == "ALL" or e.r.prof == self.category)
+            meets = (not onlyAH or PC:MeetsMinAH(e)) and (not onlyV or PC:MeetsMinV(e))
         end
         if keep and self.search ~= "" and not e.r.name:lower():find(self.search, 1, true) then keep = false end
-        if keep and PC.db.onlyProfit and not (e.profit and e.profit > 0) then keep = false end
+        if keep and onlyMin and not meets then
+            keep = false
+            self.hiddenMin = self.hiddenMin + 1
+        end
         if keep and PC.db.onlyAffordable ~= false and not PC:CanAfford(e) then
             keep = false
-            self.hiddenAfford = (self.hiddenAfford or 0) + 1
+            self.hiddenAfford = self.hiddenAfford + 1
         end
         if keep then data[#data + 1] = e end
     end
-    if self.category == "VENDOR" then
+    if vendorCat then
         for _, e in ipairs(self:AHFlips()) do
-            if self.search == "" or e.r.name:lower():find(self.search, 1, true) then data[#data + 1] = e end
+            if self.search == "" or e.r.name:lower():find(self.search, 1, true) then
+                if not onlyV or (e.profitPct or 0) >= minPct then data[#data + 1] = e
+                else self.hiddenMin = self.hiddenMin + 1 end
+            end
         end
     end
 
-    -- Sort (rows with no number always go last)
-    local key, dir = self.sortKey, self.sortDir
-    local function val(e)
-        if key == "name" then return e.r.name end
-        return e[key]
+    -- Sort. Craftable and its totals are only worked out for every row when sorting by them.
+    local s = self:SortState("recipes")
+    local CRAFT_I = { craftable = 1, totalAH = 4, totalV = 5 }
+    local function val(e, k)
+        if k == "name" then return e.r.name:lower() end
+        if k == "sell" then return e.ahFlip and e.sellAH or e.sell end -- (an AH flip: its price on the AH)
+        if k == "vendorSell" then return e.vendorSell end
+        local ci = CRAFT_I[k]
+        if ci then
+            local n, _, _, tAH, tV, _, _, nAH, nV = PC:Craftable(e)
+            if ci == 1 then return n end
+            if ci == 4 then return tAH end -- (none at a profit that way: its loss)
+            return tV
+        end
+        return e[k]
     end
-    table.sort(data, function(a, b)
-        local x, y = val(a), val(b)
-        if x == nil and y == nil then return a.r.name < b.r.name end
-        if x == nil then return false end
-        if y == nil then return true end
-        if x == y then return a.r.name < b.r.name end
-        if dir > 0 then return x < y else return x > y end
-    end)
+    UI.SortRows(data, s.key, s.dir, val, function(e) return e.r.name:lower() end)
     self.recipeData = data
-
-    -- Header arrows
-    local media = "Interface\\AddOns\\" .. ADDON .. "\\Media\\"
-    local up = "|T" .. media .. "SortUp:12:12:0:0|t"
-    local down = "|T" .. media .. "SortDown:12:12:0:0|t"
-    for _, h in ipairs(self.recipeHeaders) do
-        h.text:SetText(h.label)
-        if h.key == key then
-            h.arrow:SetTexture(media .. (dir > 0 and "SortUp" or "SortDown"))
-            h.arrow:Show()
-            h.text:SetTextColor(1, 1, 1)
-            h.active:Show()
-        else
-            h.arrow:Hide()
-            h.text:SetTextColor(1, 0.82, 0)
-            h.active:Hide()
-        end
-    end
-    if key == "score" then
-        self.sortNote = "Sorted by best bet: profit adjusted for how many are already for sale. Click a column to sort by it."
-    elseif key == "vendorProfit" then
-        self.sortNote = "Sorted by vendor profit. Click a column to sort by it."
-    else
-        self.sortNote = nil
-    end
+    self:PaintHeaders(self.recipeHeaders, "recipes")
+    -- sorted by something that isn't a column: say so
+    self.sortNote = (s.key == "score" and "Sorted by best bet") or (s.key == "profit" and "Sorted by profit") or nil
 
     if not self.selected and data[1] then self.selected = data[1].id end
     self:UpdateRecipeRows()
 end
 
+-- Craftable and its totals for one row: "12", "~12" (an estimate), "0", n/a without prices
+local GREY_DASH = "|cff888888-|r"
+local function CraftableCells(e)
+    local n, _, _, tAH, tV, _, est, nAH, nV = PC:Craftable(e)
+    if not n then return PC:Money(nil), PC:Money(nil), PC:Money(nil) end
+    local mark = est and "|cffffd100~|r" or ""
+    -- each total counts the crafts that still profit that way; none do: the loss (never left blank)
+    local function total(t) return t == nil and PC:Money(nil) or (mark .. PC:Money(t, true)) end
+    return n == 0 and "|cff8888880|r" or (mark .. "|cffffffff" .. n .. "|r"), total(tAH), total(tV)
+end
+UI.CraftableCells = CraftableCells
+
 function UI:UpdateRecipeRows()
     local data = self.recipeData or {}
     self.offset = math.min(math.max(self.offset, 0), math.max(#data - RECIPE_ROWS, 0))
+    local vendorCat = self.category == "VENDOR"
+    local plan = UI:PlanTable()
+    local paid = PC.db.vendorPaid or {}
 
     for i, row in ipairs(self.recipeRows) do
         local e = data[i + self.offset]
         if e then
             row.entry = e
+            local c = row.cell
             row.icon:SetTexture(ItemIcon(e.outID or e.r.output))
             local makes = UI.QualityTag(e.qualityUsed, e.r.outputs and #e.r.outputs, e.outID)
             if e.r.qty and e.r.qty ~= 1 then
                 makes = makes .. (" |cff888888x%s|r"):format(e.r.qty % 1 == 0 and tostring(e.r.qty) or ("%.1f"):format(e.r.qty))
             end
-            row.name:SetText(("|cffffffff%s|r%s"):format(e.r.name, makes)) -- white: grey looked "unavailable"; the arrows show skill-ups
+            if e.ahFlip then makes = makes .. " |cff40c0ff(auction flip)|r" end -- (not a craft: bought on the AH, sold to a vendor)
+            FitCell(row.name, ("|cffffffff%s|r%s"):format(e.r.name, makes)) -- white: grey looked "unavailable"; the arrows show skill-ups
             SetSkillArrows(row, e.r.diff)
-            row.cost:SetText(PC:Money(e.cost, false, true))
-            row.sell:SetText(PC:Money(e.sell, false, true))   -- one craft (all the items it makes), like Mats cost and Profit
-            if self.category == "VENDOR" and e.vendorSell and e.vendorProfit then
-                -- the Vendor flips list: what a VENDOR pays and the profit from selling there (not the AH);
-                -- orange "?" = that vendor price hasn't been seen paid yet
-                local sure = PC.db.vendorPaid and PC.db.vendorPaid[e.outID or e.r.output]
-                row.sell:SetText(PC:Money(e.vendorSell, false, true) .. (sure and "" or "|cffff8040?|r"))
-                row.profit:SetText((sure and "|cff40c0ff" or "|cffff8040") .. PC:Money(e.vendorProfit, false, true) .. "|r")
-            elseif e.route == "Vendor" and e.profit and e.profit > 0 then
-                row.profit:SetText("|cff40c0ff" .. PC:Money(e.profit, false, true) .. "|r")
+            row.shop:SetShown(not e.ahFlip) -- (an AH flip isn't a recipe: clicking it buys it)
+            row.quick:SetShown(not e.ahFlip)
+            FitCell(c.cost, PC:Money(e.cost))
+            -- orange "?" = that vendor price hasn't been seen paid yet
+            local sure = paid[e.outID or e.r.output]
+            -- one craft (all the items it makes), like Mats; an AH flip: its price on the AH
+            FitCell(c.sell, PC:Money(e.ahFlip and e.sellAH or e.sell))
+            FitCell(c.vendorSell, e.vendorSell and (PC:Money(e.vendorSell) .. (sure and "" or "|cffff8040?|r")) or PC:Money(nil))
+            FitCell(c.ahProfit, PC:Money(e.ahProfit, true))
+            -- V Profit in blue when that's where it sells
+            local v = e.vendorProfit
+            if v and v > 0 and (e.route == "Vendor" or vendorCat) then
+                FitCell(c.vendorProfit, (sure and "|cff40c0ff" or "|cffff8040") .. PC:Money(v) .. "|r")
             else
-                row.profit:SetText(PC:Money(e.profit, true, true))
+                FitCell(c.vendorProfit, PC:Money(v, true))
             end
-            local n = e.listed
-            if n == nil then row.listed:SetText("|cff888888?|r")
-            elseif n <= 5 then row.listed:SetText("|cff40ff40" .. n .. "|r")
-            elseif n <= 20 then row.listed:SetText("|cffffff00" .. n .. "|r")
-            else row.listed:SetText("|cffff5555" .. n .. "|r") end
             local pct = e.profitPct
-            if pct == nil then row.pct:SetText("|cff888888?|r")
+            if pct == nil then FitCell(c.profitPct, "|cff888888?|r")
             else
                 local shown = pct >= 10000 and ">9999" or tostring(math.floor(pct + 0.5))
-                row.pct:SetText((pct >= 0 and "|cff40ff40" or "|cffff5555") .. shown .. "%|r")
+                FitCell(c.profitPct, (pct >= 0 and "|cff40ff40" or "|cffff5555") .. shown .. "%|r")
             end
-            row.lastSold:SetText(UI.DaysText(e.lastSoldDays))
+            local n = e.listed
+            if n == nil then FitCell(c.listed, "|cff888888?|r")
+            elseif n <= 5 then FitCell(c.listed, "|cff40ff40" .. n .. "|r")
+            elseif n <= 20 then FitCell(c.listed, "|cffffff00" .. n .. "|r")
+            else FitCell(c.listed, "|cffff5555" .. n .. "|r") end
             local st = e.soldToday or 0
-            row.soldToday:SetText(st > 0 and ("|cff40ff40" .. st .. "|r") or "|cff8888880|r")
+            if st > 0 then FitCell(c.soldToday, "|cff40ff40" .. st .. "|r")
+            else FitCell(c.soldToday, e.noSalesToday and "|cffff80400|r" or "|cff8888880|r") end -- orange: not recommended for the AH
+            local cn, tah, tv = CraftableCells(e)
+            FitCell(c.craftable, cn); FitCell(c.totalAH, tah); FitCell(c.totalV, tv)
             row.sel:SetShown(e.id == self.selected)
-            local inPlan = (UI:PlanTable()[e.id] or 0) > 0 -- in your crafting plan
+            local inPlan = (plan[e.id] or 0) > 0 -- in your crafting plan
             row.multi:SetShown(inPlan)
             row.multiEdge:SetShown(inPlan)
             row:Show()
@@ -2380,7 +2685,11 @@ function UI:UpdateRecipeRows()
         end
     end
 
+    local minText = ("%s%%"):format(PC:MinProfitPct())
     local msg = ""
+    -- (said by what really hid the rows: a ticked box that hid nothing isn't blamed)
+    local hidMin, hidAfford = (self.hiddenMin or 0) > 0, (self.hiddenAfford or 0) > 0
+    local affordMsg = "Nothing here you can afford right now.\nUntick \"Can afford\" to see the rest."
     if #data == 0 then
         if not next(PC.cdb.recipes) then
             msg = "No recipes yet.\nOpen each of your profession windows once and they'll show up here."
@@ -2388,24 +2697,29 @@ function UI:UpdateRecipeRows()
             and #PC.cdb.skipped[self.category] > 0 then
             msg = self.category .. " recipes make no item to sell, so they can't be priced.\nSee the Scanned items tab for details."
         elseif self.category == "BEST" then
-            msg = "No best bets yet.\nScan the Auction House to find recipes that make money and will sell."
+            msg = ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold today at least half as many as are listed. Scan the Auction House to find some."):format(minText)
         elseif self.category == "VENDOR" then
-            msg = "No vendor flips right now.\nNone of your recipes sell to a vendor for more than the materials cost, and nothing on the AH is below what a vendor pays."
+            msg = hidMin and ("No vendor flips at %s+ Vendor profit right now.\nUntick \"Only %s+ Vendor profit\" to see smaller ones."):format(minText, minText)
+                or hidAfford and affordMsg
+                or "No vendor flips right now.\nNo recipe sells to a vendor for more than its materials cost, and nothing at auction is below what a vendor pays."
         elseif self.search ~= "" then
             msg = "No recipes match your search."
-        elseif PC.db.onlyProfit then
-            msg = "Nothing profitable here right now.\nScan the Auction House, or untick \"Only profitable\"."
+        elseif hidMin then
+            local onlyAH, onlyV = PC.db.onlyProfit, PC.db.onlyVProfit
+            local boxes = (onlyAH and onlyV) and ("\"Only %s+ Auction profit\" or \"Only %s+ Vendor profit\""):format(minText, minText)
+                or ("\"Only %s+ %s profit\""):format(minText, onlyV and "V" or "AH")
+            msg = ("Nothing here makes %s profit as ticked.\nScan the Auction House, or untick %s."):format(minText, boxes)
+        elseif hidAfford then
+            msg = affordMsg
         end
     end
     self.recipeEmpty:SetText(msg)
-    -- one short line: [in plan] · rows shown · what's hidden (hover the line for details)
+    -- one short line: [in plan] · how it's sorted · rows shown · what's hidden
     local parts = {}
     local nPlan = 0
-    for _ in pairs(UI:PlanTable()) do nPlan = nPlan + 1 end
+    for _ in pairs(plan) do nPlan = nPlan + 1 end
     if nPlan > 0 then parts[#parts + 1] = ("|cff40a0ff%d in plan|r"):format(nPlan) end
-    if self.sortNote and #data > 0 then
-        parts[#parts + 1] = (self.sortKey == "score") and "Sorted by best bet" or "Sorted by vendor profit"
-    end
+    if self.sortNote and #data > 0 then parts[#parts + 1] = self.sortNote end
     if #data > 0 then
         parts[#parts + 1] = ("%d-%d of %d%s"):format(self.offset + 1, math.min(self.offset + RECIPE_ROWS, #data), #data,
             #data > RECIPE_ROWS and " (scroll)" or "")
@@ -2414,18 +2728,18 @@ function UI:UpdateRecipeRows()
     for _ in pairs(PC.cdb.recipes) do nAll = nAll + 1 end
     for _ in pairs(PC:ShownRecipes()) do nShown = nShown + 1 end
     local hidden = {}
+    if (self.hiddenMin or 0) > 0 then hidden[#hidden + 1] = ("%d under %s profit"):format(self.hiddenMin, minText) end
     if (self.hiddenAfford or 0) > 0 then hidden[#hidden + 1] = self.hiddenAfford .. " too pricey" end
     if nShown < nAll then hidden[#hidden + 1] = (nAll - nShown) .. " other expansions" end
     if #hidden > 0 then parts[#parts + 1] = "|cff888888hidden: " .. table.concat(hidden, ", ") .. "|r" end
-    local countText = table.concat(parts, "  |cff666666·|r  ")
-    self.recipeCount:SetText(countText)
+    self.recipeCount:SetText(table.concat(parts, "  |cff666666·|r  "))
 end
 
 ---------------------------------------------------------------------------
 -- Tab 7: Settings (the same settings as in the game's AddOns options)
 ---------------------------------------------------------------------------
 function UI:CreateSettingsTab(p)
-    local box = Panel(p, 12, -60, 756, 10)
+    local box = Panel(p, 12, -60, PW, 10)
     box:ClearAllPoints()
     box:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -60)
     box:SetPoint("BOTTOMRIGHT", p, "BOTTOMRIGHT", -12, 62)
@@ -2691,7 +3005,13 @@ UI.Parts = {
     HasTemplate = HasTemplate,
     Text = Text,
     CraftButton = CraftButton,
-    HeaderButton = HeaderButton,
+    Header = Header,
+    Columns = Columns,
+    FitCell = FitCell,
+    HEAD_H = HEAD_H,
+    LIST_Y = LIST_Y,
+    PW = PW,
+    RW = RW,
     HeaderStrip = HeaderStrip,
     ItemIcon = ItemIcon,
     Panel = Panel,

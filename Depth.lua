@@ -74,7 +74,7 @@ function PC:DepthLines(itemID, want)
     local d = self:DepthTable()[itemID]
     if not d or not d.list or #d.list == 0 then
         lines[#lines + 1] = PC.ahOpen and "|cff888888Live listings not checked yet. Click to check now.|r"
-            or "|cff888888Live listings: open the AH and click to check.|r"
+            or "|cff888888Live listings: open the Auction House and click to check.|r"
         return lines
     end
     lines[#lines + 1] = ("|cffffd100Live listings|r |cff888888(checked %s ago, %d for sale)|r"):format(
@@ -135,7 +135,8 @@ function Depth:Read(itemID)
     end
     if total == 0 then return end -- nothing arrived (or nothing for sale): keep what we had
     table.sort(list, function(a, b) return a.p < b.p end)
-    PC:DepthTable()[itemID] = { t = time(), total = total, list = list }
+    -- (and what the scan said about it then: unchanged next scan, the listings needn't be read again)
+    PC:DepthTable()[itemID] = { t = time(), total = total, list = list, seenQty = PC:Supply()[itemID], seenMin = list[1] and list[1].p }
     if list[1] then
         -- the live cheapest price is the best price we know
         PC:Prices()[itemID] = list[1].p
@@ -180,7 +181,7 @@ function Depth:Finish(itemID, ok)
     self.busy, self.token = nil, nil
     PC:RefreshUI()
     if self.onItem then self.onItem(itemID) end
-    C_Timer.After(0.15, function() Depth:Next() end)
+    C_Timer.After(0, function() Depth:Next() end) -- (the AH's own throttle paces the searches)
 end
 
 function Depth:Stop()
@@ -228,13 +229,30 @@ function Depth:ScanIDs()
                 local id, _, src = PC:ReagentFor(rg, mode)
                 if id and not set[id] and src == "AH" and (supply[id] or 1) > 0 and PC:IsCommodity(id) then
                     set[id] = true
-                    ids[#ids + 1] = id
+                    if not self:Unchanged(id) then ids[#ids + 1] = id end
                 end
             end
         end
     end
     while #ids > PC.DEPTH_MAX_ITEMS do table.remove(ids) end
     return ids
+end
+
+-- Listings read in the last 2 hours whose amount listed and cheapest price the scan just found are
+-- the same as when they were read: nothing to read again
+Depth.KEEP = 2 * 3600
+function Depth:Unchanged(id)
+    local d = PC:DepthTable()[id]
+    if not d or not d.list or not d.t or time() - d.t > self.KEEP or not d.seenQty then return false end
+    local q, p = PC:Supply()[id], PC:Prices()[id]
+    return q == d.seenQty and p ~= nil and p == d.seenMin
+end
+
+-- (a scan saw the item change, none listed included: the stored listings would price what isn't there)
+function PC:DepthScanned(itemID, price, qty)
+    local D = self:DepthTable()
+    local d = D[itemID]
+    if d and (not price or (qty or 0) <= 0 or price ~= d.seenMin or qty ~= d.seenQty) then D[itemID] = nil end
 end
 
 function Depth:ShouldRun()

@@ -7,7 +7,7 @@ local P = UI.Parts
 local HasTemplate = P.HasTemplate
 local Text = P.Text
 local CraftButton = P.CraftButton
-local HeaderButton = P.HeaderButton
+local Columns, FitCell, PW, RW, LIST_Y = P.Columns, P.FitCell, P.PW, P.RW, P.LIST_Y
 local HeaderStrip = P.HeaderStrip
 local ItemIcon = P.ItemIcon
 local Panel = P.Panel
@@ -33,6 +33,8 @@ local CLICK_HINT = P.CLICK_HINT
 -- Recipes get here from the bag icon on the Recipes tab (it asks how many).
 local PLAN_ROWS, MAT_ROWS = 5, 5
 local PLAN_TOP = -90   -- plan bar (which saved plan) sits above, at -62
+local PLAN_H = -LIST_Y + PLAN_ROWS * ROW_H + 8 -- a table: its header, the rows, a little room
+local MAT_H = -LIST_Y + MAT_ROWS * ROW_H + 8
 
 -- The plan you're working on (saved per character; pick another from the plan bar)
 function UI:PlanTable()
@@ -235,7 +237,7 @@ end
 function UI:CreateQtyPopup()
     if self.qty then return self.qty end
     local q = CreateFrame("Frame", "ProfitCrafterQtyPopup", self.f, "BackdropTemplate")
-    q:SetSize(290, 156)
+    q:SetSize(380, 156)
     q:SetFrameStrata("DIALOG")
     q:EnableMouse(true)
     if q.SetBackdrop then
@@ -248,7 +250,7 @@ function UI:CreateQtyPopup()
     q:Hide()
     q.title = q:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     q.title:SetPoint("TOPLEFT", 12, -12)
-    q.title:SetWidth(266)
+    q.title:SetWidth(356)
     q.title:SetJustifyH("LEFT")
     q.title:SetWordWrap(false)
 
@@ -281,13 +283,31 @@ function UI:CreateQtyPopup()
         local e = q.entry
         if e then eb:SetText(tostring(math.max(UI:MaxMoreFitting(e.id, true), 1))); UI:UpdateQtyPopup() end
     end)
+    q.max:SetScript("OnEnter", function(b)
+        ShowTooltip(b, { "Max", "The most your gold (or spending limit) and bags allow, at any profit." })
+    end)
+    q.max:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    -- Max profitable: the most that fit AND still make a profit, every craft priced up the listings
+    q.maxProfit = CreateFrame("Button", nil, q, "UIPanelButtonTemplate")
+    q.maxProfit:SetSize(140, 22)
+    q.maxProfit:SetPoint("LEFT", q.max, "RIGHT", 6, 0)
+    q.maxProfit:SetScript("OnClick", function()
+        local e = q.entry
+        if e then eb:SetText(tostring(math.max(UI:MaxProfitable(e), 1))); UI:UpdateQtyPopup() end
+    end)
+    q.maxProfit:SetScript("OnEnter", function(b)
+        ShowTooltip(b, { "Max profitable", "The most your gold, bags and plan allow while every craft still makes a profit",
+            "(auction or vendor), at live listing prices.",
+            ("|cff888888Buying stops at your %d%% minimum profit.|r"):format(PC:MinProfitPct()) })
+    end)
+    q.maxProfit:SetScript("OnLeave", function() GameTooltip:Hide() end)
     q.info = q:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     q.info:SetPoint("TOPLEFT", 12, -66)
-    q.info:SetWidth(266)
+    q.info:SetWidth(356)
     -- over-budget warning on its own lines, below the info (the popup grows to fit it)
     q.warn = q:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     q.warn:SetPoint("TOPLEFT", q.info, "BOTTOMLEFT", 0, -8)
-    q.warn:SetWidth(266)
+    q.warn:SetWidth(356)
     q.warn:SetJustifyH("LEFT")
     q.warn:SetSpacing(2)
     q.info:SetJustifyH("LEFT")
@@ -338,6 +358,9 @@ function UI:UpdateQtyPopup()
     local n = math.max(tonumber(q.eb:GetText()) or 0, 0)
     local maxN = self:MaxMoreFitting(e.id, true)
     q.max:SetText(("Max (%d)"):format(maxN))
+    local maxP = self:MaxProfitable(e, maxN)
+    q.maxProfit:SetText(("Max profitable (%d)"):format(maxP))
+    q.maxProfit:SetEnabled(maxP > 0)
     -- what stops it there: your gold (or spending limit), or bag room
     local cur = PC:CurrentPlan()[e.id] or 0
     local _, _, _, limitWhy, lneed, lfree = self:PlanFits(e.id, cur + maxN + 1, true)
@@ -346,22 +369,28 @@ function UI:UpdateQtyPopup()
         if limitWhy == "bags" then
             maxWhy = ("|cff888888Max %d: bag room (it would need %d slots, %d free).|r"):format(maxN, lneed or 0, lfree or 0)
         elseif limitWhy == "gold" then
-            maxWhy = ("|cff888888Max %d: %s, counting AH prices as the cheap ones run out, and posting fees.|r"):format(maxN, self:BudgetName())
+            maxWhy = ("|cff888888Max %d: %s, counting auction prices as the cheap ones run out, and posting fees.|r"):format(maxN, self:BudgetName())
         end
     end
     local _, total, missing = PC:ShoppingList(e, math.max(n, 1))
     local lines = {}
     lines[#lines + 1] = "Materials to buy: " .. (missing and "|cffff5555unknown|r" or PC:Money(n > 0 and total or 0))
-    if e.profit then
-        lines[#lines + 1] = "Profit: " .. PC:Money(e.profit * n, true)
-    else
-        lines[#lines + 1] = "Profit: |cff888888unknown (no price yet)|r"
-    end
+    -- the whole batch, its materials priced up the listings
+    local ah, v = PC:BatchProfit(e, math.max(n, 1))
+    if n <= 0 then ah, v = 0, 0 end
+    lines[#lines + 1] = ("Auction Profit: %s   Vendor Profit: %s"):format(PC:Money(ah, true), PC:Money(v, true))
+    if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
     local qty = e.r.qty or 1
     lines[#lines + 1] = ("|cff888888Makes %s %s|r"):format(qty % 1 == 0 and tostring(qty * n) or ("about " .. math.floor(qty * n + 0.5)), e.r.name)
     local have = PC:CurrentPlan()[e.id]
     if have then lines[#lines + 1] = ("|cff40a0ffAlready %d in your plan; this adds more.|r"):format(have) end
     if maxWhy then lines[#lines + 1] = maxWhy end
+    -- where buying stops: past it a craft makes under the minimum profit (the plan is cut to it then)
+    local buyN = PC:BuyCrafts(e)
+    if buyN and buyN < cur + math.max(n, maxP) then
+        lines[#lines + 1] = buyN <= cur and ("|cffff8040Buying stops here: more would drop under your %d%% minimum profit.|r"):format(PC:MinProfitPct())
+            or ("|cffff8040Buying stops at %d: beyond that a craft drops under your %d%% minimum profit.|r"):format(buyN - cur, PC:MinProfitPct())
+    end
     local ok, cost, budget, why, need, free = self:PlanFits(e.id, (PC:CurrentPlan()[e.id] or 0) + n, true)
     -- more than the market wants: allowed (crafting waits on sales, in batches), just said
     if ok and n > 0 then
@@ -392,6 +421,67 @@ function UI:UpdateQtyPopup()
     q.add:SetEnabled(n > 0 and ok)
 end
 
+-- The most crafts of a recipe to add that fit the plan (gold, bags) and where every craft still makes a
+-- profit (Craftable at Profit, less what the plan already holds of it). maxFit: MaxMoreFitting, if known.
+function UI:MaxProfitable(e, maxFit)
+    if not e then return 0 end
+    maxFit = maxFit or self:MaxMoreFitting(e.id, true)
+    local n = PC:Craftable(e) or 0
+    local cur = PC:CurrentPlan()[e.id] or 0
+    return math.max(math.min(maxFit, n - cur), 0)
+end
+
+-- The material a recipe's crafts spend most on that's bought on the AH (nil: none to buy there):
+-- { id, name, qty } for `crafts` crafts (default: what the plan holds of it)
+function UI:MainAHMaterial(e, crafts)
+    crafts = crafts or (self:PlanTable()[e.id] or 0)
+    if not e or crafts <= 0 then return nil end
+    local list = PC:CombinedShoppingList({ setmetatable({ planCount = crafts }, { __index = e }) }, 1)
+    local best, bestSpend
+    for _, it in ipairs(list or {}) do
+        if (it.buy or 0) > 0 and it.src ~= "Vendor" and not it.craft and not it.tool and PC.Buy:CanBuy(it.id)
+            and PC.Buy:AHQty(it.id, it.buy) > 0 then
+            local spend = it.sub or ((it.unit or 0) * it.buy)
+            if not best or spend > bestSpend then best, bestSpend = it, spend end
+        end
+    end
+    return best and { id = best.id, name = PC:ItemName(best.id), qty = best.buy } or nil
+end
+
+-- Quick Buy: as many crafts as make the minimum profit right now and fit your gold and bags go in
+-- the plan, the main AH material is bought in this same click (the game needs the click to ask the
+-- AH for the price; it's checked and confirmed by itself), and the plan opens for the rest.
+function UI:QuickBuy(e)
+    if not e or e.ahFlip or not e.r then return end
+    local plan = self:PlanTable()
+    local cur = plan[e.id] or 0
+    local pct = PC:MinProfitPct()
+    local target = PC:BuyCrafts(e)
+    local add = target and math.max(math.min(target - cur, self:MaxMoreFitting(e.id, true)), 0) or 0
+    if add <= 0 and cur <= 0 then
+        local why = (target and target > 0) and "none fit your gold or bags"
+            or ("none make %d%% profit at today's prices"):format(pct)
+        return PC.Buy:Say(("|cffff8040Quick Buy: no %s added: %s.|r"):format(e.r.name, why))
+    end
+    if add > 0 then
+        plan[e.id] = math.min(cur + add, 9999)
+        if self.tab == 1 and self.category == "VENDOR" then self:SetSellVia(e.outID or e.r.output, "Vendor", true) end
+        PC:ForgetStopList()
+    end
+    local main = self:MainAHMaterial(e)
+    -- (bought before anything else: the purchase has to start inside this click)
+    if main and PC.ahOpen then PC.Buy:Start({ id = main.id, name = main.name }, false, true) end
+    local parts = {}
+    parts[#parts + 1] = add > 0 and ("Quick Buy: added %d %s (%d planned), all that make %d%% profit."):format(add, e.r.name, plan[e.id], pct)
+        or ("Quick Buy: %s already planned (%d); no more make %d%% profit."):format(e.r.name, cur, pct)
+    if main and PC.ahOpen then parts[#parts + 1] = ("Buying %s now. Click Buy for the other materials."):format(main.name or "main material")
+    elseif main then parts[#parts + 1] = "Open the Auction House to buy its materials."
+    else parts[#parts + 1] = "Nothing to buy at auction: its materials come from vendors or your bags." end
+    PC.Print(table.concat(parts, " "))
+    self:ShowTab(2)
+    PC:RefreshUI()
+end
+
 function UI:QtyAdd()
     local q = self.qty
     if not q or not q.entry then return end
@@ -418,13 +508,20 @@ end
 function UI:CreateShoppingPage(p)
     PC:Safe("plan bar", self.CreatePlanBar, self, p)
     -- recipes in the plan
-    local pp = Panel(p, 12, PLAN_TOP, 756, 26 + PLAN_ROWS * ROW_H + 10)
-    HeaderStrip(pp, 748)
-    HeaderButton(pp, 4, 280, "Recipe")
-    HeaderButton(pp, 284, 96, "How many")
-    HeaderButton(pp, 380, 84, "Mats", nil, "RIGHT")
-    HeaderButton(pp, 464, 96, "Profit", nil, "RIGHT")
-    HeaderButton(pp, 566, 120, "Materials")
+    local pp = Panel(p, 12, PLAN_TOP, PW, PLAN_H)
+    HeaderStrip(pp)
+    local cols = {
+        { "name", "Recipe", nil, "The hammer opens it in your profession window.", text = true },
+        { "planCount", "How many", 96, "How many crafts are planned. Type a number, or use - and +." },
+        { "craftable", "Craftable at Profit", 70, "How many you can craft at a profit with your materials and gold (or spending limit), buying the rest at live listing prices. Buying stops sooner, at your minimum profit." },
+        { "mats", "Mats", 84, "Cost of the materials still to buy (what you have counts first)." },
+        { "ahProfit", "Auction Profit", 92, "Auction Profit for all planned crafts, materials at live listing prices, after the 5% auction cut." },
+        { "vendorProfit", "Vendor Profit", 92, "Vendor Profit for all planned crafts, priced the same way." },
+        { "matsMode", "Materials", 110, "Cheapest or top-quality materials (recipes with quality ranks). At the profession window: craft them.", text = true },
+        { nil, nil, 30 }, -- the X that takes it off the plan
+    }
+    self.planHeaders = Columns(pp, cols, "plan")
+    local C = cols.by
     self.planEmpty = pp:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     self.planEmpty:SetPoint("CENTER", 0, -10)
     self.planEmpty:SetWidth(600)
@@ -433,8 +530,8 @@ function UI:CreateShoppingPage(p)
     self.planRows = {}
     for i = 1, PLAN_ROWS do
         local row = CreateFrame("Button", nil, pp)
-        row:SetSize(748, ROW_H)
-        row:SetPoint("TOPLEFT", 4, -28 - (i - 1) * ROW_H)
+        row:SetSize(RW, ROW_H)
+        row:SetPoint("TOPLEFT", 4, LIST_Y - (i - 1) * ROW_H)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         Stripe(row, i)
         local hl = row:CreateTexture(nil, "HIGHLIGHT")
@@ -444,9 +541,9 @@ function UI:CreateShoppingPage(p)
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
         SkillArrows(row, 27)
-        row.name = RowText(row, 41, 213)
+        row.name = RowText(row, 41, C.name.w - 41 - 30)
         row.craft = CraftButton(row, 18)
-        row.craft:SetPoint("LEFT", 260, 0)
+        row.craft:SetPoint("LEFT", C.name.w - 26, 0)
         local function Small(text, x, onClick)
             local b = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
             b:SetSize(20, 18)
@@ -455,27 +552,38 @@ function UI:CreateShoppingPage(p)
             b:SetScript("OnClick", onClick)
             return b
         end
-        row.minus = Small("-", 286, function() if row.entry then UI:SetPlanCount(row.entry.id, row.entry.planCount - 1) end end)
+        -- -, the count, + : against the right of the column, under its label
+        local plusX = C.planCount.x + C.planCount.w - 4 - 20
+        row.minus = Small("-", plusX - 70, function() if row.entry then UI:SetPlanCount(row.entry.id, row.entry.planCount - 1) end end)
         row.count = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
         row.count:SetSize(40, 18)
-        row.count:SetPoint("LEFT", 314, 0)
+        row.count:SetPoint("LEFT", plusX - 42, 0)
         row.count:SetAutoFocus(false)
         row.count:SetNumeric(true)
         row.count:SetMaxLetters(4)
         row.count:SetJustifyH("CENTER")
-        row.count:SetScript("OnEnterPressed", function(eb)
-            eb:ClearFocus()
-            if row.entry then UI:SetPlanCount(row.entry.id, eb:GetText()) end
-        end)
+        -- the number goes to the recipe the box was for when you started typing (the rows can move)
+        row.count:SetScript("OnEditFocusGained", function(eb) eb.editID = row.entry and row.entry.id end)
+        row.count:SetScript("OnEnterPressed", function(eb) eb:ClearFocus() end)
+        row.count:SetScript("OnEscapePressed", function(eb) eb.editID = nil; eb:ClearFocus(); UI:UpdateShopping() end)
         row.count:SetScript("OnEditFocusLost", function(eb)
-            if row.entry and tonumber(eb:GetText()) ~= row.entry.planCount then UI:SetPlanCount(row.entry.id, eb:GetText()) end
+            local id, n = eb.editID, tonumber(eb:GetText())
+            eb.editID = nil
+            if id and n and n ~= (UI:PlanTable()[id] or 0) then UI:SetPlanCount(id, n)
+            else UI:UpdateShopping() end -- (left empty: nothing changes; the X takes it off)
         end)
-        row.plus = Small("+", 356, function() if row.entry then UI:SetPlanCount(row.entry.id, row.entry.planCount + 1) end end)
-        row.mats = RowText(row, 376, 84, "RIGHT")
-        row.profit = RowText(row, 460, 96, "RIGHT")
+        row.plus = Small("+", plusX, function() if row.entry then UI:SetPlanCount(row.entry.id, row.entry.planCount + 1) end end)
+        row.cell = {}
+        for _, k in ipairs({ "craftable", "mats", "ahProfit", "vendorProfit" }) do
+            local fs = RowText(row, C[k].x, C[k].w - 4, "RIGHT")
+            fs:SetFontObject("GameFontHighlight")
+            fs.bigFont = "GameFontHighlight"
+            row.cell[k] = fs
+        end
+        local btnX = C.matsMode.x + C.matsMode.w - 4 - 100
         row.matsBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         row.matsBtn:SetSize(100, 18)
-        row.matsBtn:SetPoint("LEFT", 566, 0)
+        row.matsBtn:SetPoint("LEFT", btnX, 0)
         row.matsBtn:SetScript("OnClick", function()
             local e = row.entry
             if not e or not e.high then return end
@@ -491,7 +599,7 @@ function UI:CreateShoppingPage(p)
         -- Craft N: shows instead of the materials button while that profession's window is open
         row.craftNow = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         row.craftNow:SetSize(100, 18)
-        row.craftNow:SetPoint("LEFT", 566, 0)
+        row.craftNow:SetPoint("LEFT", btnX, 0)
         row.craftNow:SetScript("OnClick", function()
             local e = row.entry
             if e then PC:Safe("crafting", PC.Craft.Go, PC.Craft, e) end
@@ -515,15 +623,20 @@ function UI:CreateShoppingPage(p)
             local note = PC:PlanName() == "Gear upgrades" and PC.cdb.gearNotes and PC.cdb.gearNotes[e.r.output]
             local lines = { e.r.name }
             if not note then
-                lines[#lines + 1] = ("%d crafts, %s profit"):format(e.planCount, e.profit and PC:Money(e.profit * e.planCount, true) or "unknown")
-                lines[#lines + 1] = ("Sells: %s"):format(e.route == "Vendor" and "|cff40c0ffto a vendor|r" or e.route == "Disenchant" and "|cffc080ffdisenchanted for dust|r" or "on the AH")
+                local ah, v = PC:BatchProfit(e, e.planCount)
+                lines[#lines + 1] = ("%d crafts: Auction Profit %s, Vendor Profit %s"):format(e.planCount, PC:Money(ah, true), PC:Money(v, true))
+                lines[#lines + 1] = "|cff888888(the whole batch, at live listing prices)|r"
+                lines[#lines + 1] = ("Sells: %s"):format(e.route == "Vendor" and "|cff40c0ffto a vendor|r" or e.route == "Disenchant" and "|cffc080ffdisenchanted for dust|r" or "at auction")
+                if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
+                for _, l in ipairs(UI:IngredientLines(e.r, e.mats)) do lines[#lines + 1] = l end
+                for _, l in ipairs(UI:CraftableLines(e)) do lines[#lines + 1] = l end
             end
             if note then
                 local what, changes = UI:GearLine({ kind = note.kind, oldName = note.old, ups = note.ups, downs = note.downs })
                 lines[#lines + 1] = note.kind == "upgrade" and ("|cff40ff40Upgrade:|r " .. what) or ("|cffffd100Suggestion:|r " .. what .. ", your call")
                 if changes ~= "" then lines[#lines + 1] = changes end
             end
-            lines[#lines + 1] = "|cff888888Right-click: craft it   Shift-click: search the AH   Alt-click: vendor / AH|r"
+            lines[#lines + 1] = "|cff888888Right-click: craft it   Shift-click: search the Auction House   Alt-click: vendor / auction|r"
             ShowTooltip(r, lines, e.outID or e.r.output)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -542,17 +655,22 @@ function UI:CreateShoppingPage(p)
     end
 
     -- everything to buy for the whole plan
-    local mp = Panel(p, 12, PLAN_TOP - (26 + PLAN_ROWS * ROW_H + 10) - 6, 756, 26 + MAT_ROWS * ROW_H + 10)
-    HeaderStrip(mp, 748)
-    HeaderButton(mp, 4, 236, "Materials for everything")
-    HeaderButton(mp, 240, 60, "Need", nil, "RIGHT")
-    HeaderButton(mp, 300, 90, "Have", nil, "RIGHT")
-    HeaderButton(mp, 390, 60, "Buy", nil, "RIGHT")
-    HeaderButton(mp, 450, 92, "Each", nil, "RIGHT")
-    HeaderButton(mp, 542, 112, "Total", nil, "RIGHT")
+    local mp = Panel(p, 12, PLAN_TOP - PLAN_H - 6, PW, MAT_H)
+    HeaderStrip(mp)
+    local mcols = {
+        { "name", "Materials for everything", nil, "Everything to buy or make for the whole plan.", text = true },
+        { "need", "Need", 60, "How many the whole plan needs." },
+        { "have", "Have", 100, "How many you have: bags, bank, mail and purchases on the way (the brackets say where)." },
+        { "buy", "Buy", 70, "How many are still to buy. Make: cheaper to craft yourself." },
+        { "each", "Each", 96, "Average price each, buying from the cheapest listing up." },
+        { "total", "Total", 196, "What buying them costs. Red with a +: not enough are listed." },
+        { nil, nil, 92 }, -- the Buy button
+    }
+    self.matHeaders = Columns(mp, mcols, "mats")
+    local M = mcols.by
     local list = CreateFrame("Frame", nil, mp)
-    list:SetPoint("TOPLEFT", 4, -28)
-    list:SetSize(748, MAT_ROWS * ROW_H)
+    list:SetPoint("TOPLEFT", 4, LIST_Y)
+    list:SetSize(RW, MAT_ROWS * ROW_H)
     list:EnableMouseWheel(true)
     list:SetScript("OnMouseWheel", function(_, delta)
         UI.shopOffset = (UI.shopOffset or 0) - delta * 3
@@ -564,19 +682,15 @@ function UI:CreateShoppingPage(p)
     for i = 1, MAT_ROWS do
         local row = CreateFrame("Button", nil, list)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        row:SetSize(748, ROW_H)
+        row:SetSize(RW, ROW_H)
         row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_H)
         Stripe(row, i)
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
         -- (Have is wide enough for "45 (120 bank)" without running into Need)
-        row.name = RowText(row, 30, 206)
-        row.need = RowText(row, 236, 60, "RIGHT")
-        row.have = RowText(row, 296, 90, "RIGHT")
-        row.buy = RowText(row, 386, 60, "RIGHT")
-        row.each = RowText(row, 446, 92, "RIGHT")
-        row.total = RowText(row, 538, 112, "RIGHT")
+        row.name = RowText(row, 30, M.name.w - 34)
+        for _, k in ipairs({ "need", "have", "buy", "each", "total" }) do row[k] = RowText(row, M[k].x, M[k].w - 4, "RIGHT") end
         -- Buy straight from the AH: first click gets the price, second click buys
         row.buyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         row.buyBtn:SetSize(84, 20)
@@ -585,27 +699,31 @@ function UI:CreateShoppingPage(p)
         row.buyBtn:SetScript("OnClick", function()
             local it = row.buyItem
             if not it then return end
-            if it.vendor then PC:Safe("buying", PC.VendorBuy.Buy, PC.VendorBuy, it.id, it.qty)
+            if it.vendor then PC:Safe("buying", PC.VendorBuy.Buy, PC.VendorBuy, it.id, it.qty, nil, nil, true)
             elseif it.search then PC:Safe("search", PC.Buy.SearchAH, PC.Buy, it)
             else PC:Safe("buying", PC.Buy.Click, PC.Buy, it) end
         end)
         row.buyBtn:SetScript("OnEnter", function(b)
             if row.buyItem and row.buyItem.search then
                 local cap = PC.Buy:VendorPrice(row.buyItem.id)
-                ShowTooltip(b, { "Find it on the AH",
-                    ("This game's AH can't buy for you: this runs the search, you click the buyout. Buy %d%s."):format(row.buyItem.qty,
-                        cap and (", no more than " .. PC:Money(cap, false, true) .. " each (a vendor sells it for that)") or "") })
+                ShowTooltip(b, { "Find it at auction",
+                    ("This game's Auction House can't buy for you: this runs the search, you click the buyout. Buy %d%s."):format(row.buyItem.qty,
+                        cap and (", under " .. PC:Money(cap, false, true) .. " each (what a vendor charges)") or "") })
                 return
             end
             if row.buyItem and row.buyItem.vendor then
                 ShowTooltip(b, { "Buy " .. row.buyItem.qty .. " from this vendor",
-                    "Goes straight into your bags.", "|cff888888Cheaper here than on the AH.|r" })
+                    "Goes straight into your bags.", "|cff888888Cheaper here than at auction.|r" })
                 return
             end
             local tip = { "Buy " .. (row.buyItem and row.buyItem.qty or "") .. " now" }
             if row.buyItem and (row.buyItem.vendorRest or 0) > 0 then
-                tip[#tip + 1] = ("|cffff8040Only %d are listed at or below the vendor's price: get the other %d from a vendor.|r"):format(
-                    row.buyItem.qty, row.buyItem.vendorRest)
+                tip[#tip + 1] = ("|cffff8040Only %d are listed under what a vendor charges. Buy the other %d from a vendor.|r"):format(
+                    row.buyItem.qty + (row.buyItem.stopped or 0), row.buyItem.vendorRest)
+            end
+            if row.buyItem and (row.buyItem.stopped or 0) > 0 then
+                tip[#tip + 1] = ("|cffff8040%d more would drop the craft under %d%% profit: not bought.|r"):format(
+                    row.buyItem.stopped, PC:MinProfitPct())
             end
             if not PC.ahOpen then tip[#tip + 1] = "|cffff8040Open the Auction House to buy.|r" end
             tip[#tip + 1] = "First click gets the live price, the next click buys."
@@ -647,31 +765,13 @@ function UI:CreateShoppingPage(p)
     end
 
     -- totals + actions
-    local by = PLAN_TOP - (26 + PLAN_ROWS * ROW_H + 10) - 6 - (26 + MAT_ROWS * ROW_H + 10) - 8
-    self.shopSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, 270))
+    local by = PLAN_TOP - PLAN_H - 6 - MAT_H - 8
+    -- (the buttons along the right take 490; the clean look moves them and gives this the whole width)
+    self.shopSummary = UI.Ink(Text(p, "GameFontHighlightSmall", 16, by - 6, PW - 500))
     self.shopSummary:SetWordWrap(false)
-    -- Next step: the one thing to do next (buy, collect, craft or post), also on a key
-    local nextBtn = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
-    nextBtn:SetSize(230, 24)
-    nextBtn:SetPoint("TOPRIGHT", p, "TOPLEFT", 768, by)
-    nextBtn:SetText("Next task")
-    nextBtn:SetScript("OnClick", function() PC:Safe("next task", PC.Next.Run, PC.Next) end)
-    nextBtn:SetScript("OnEnter", function(b)
-        local key = PC.Next:KeyText()
-        local lines = { "Next task" }
-        for line in ((b.tip or "") .. "\n"):gmatch("(.-)\n") do if line ~= "" then lines[#lines + 1] = "|cffffffff" .. line .. "|r" end end
-        for _, l in ipairs({ "Always the next thing to do in your plan: buy at the AH, buy at a vendor,",
-            "collect your mail, craft, or post what you crafted.",
-            "|cff888888The game needs a click (or key press) for every purchase, post and craft.|r",
-            key and ("Key: |cffffffff" .. key .. "|r") or "|cff888888Set a key for it in the settings.|r" }) do lines[#lines + 1] = l end
-        ShowTooltip(b, lines)
-    end)
-    nextBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    self.buyNextBtn = nextBtn
-    self.nextBtn = nextBtn
+    -- (the Next task button lives on the floating Task Button bar, not here)
     local clear = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
     clear:SetSize(80, 24)
-    clear:SetPoint("RIGHT", nextBtn, "LEFT", -6, 0)
     clear:SetText("Clear Plan")
     clear:SetScript("OnClick", function()
         wipe(UI:PlanTable())
@@ -680,10 +780,7 @@ function UI:CreateShoppingPage(p)
     clear:SetScript("OnEnter", function(b) ShowTooltip(b, { "Clear plan", "Empties the plan shown at the top. The plan itself stays saved." }) end)
     clear:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.shopClear = clear
-    -- the Next step button lives on the floating bar; here it was a duplicate ("Set up a plan")
-    nextBtn:Hide()
-    clear:ClearAllPoints()
-    clear:SetPoint("TOPRIGHT", p, "TOPLEFT", 768, by)
+    clear:SetPoint("TOPRIGHT", p, "TOPLEFT", 12 + PW, by)
     -- Skill up: a plan of crafts that raise your skill, cheapest per point (profit not needed)
     local skill = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
     skill:SetSize(74, 24)
@@ -762,9 +859,10 @@ function UI:CreateShoppingPage(p)
     haveBtn:SetText("Have materials")
     haveBtn:SetScript("OnClick", function() PC:Safe("have materials", UI.PlanFromBags, UI) end)
     haveBtn:SetScript("OnEnter", function(b)
-        if b.none then return ShowTooltip(b, { "Have materials", "Currently you have no materials to craft any items in your professions." }) end
-        ShowTooltip(b, { "Have materials", "Makes a \"Have materials\" plan: every profitable recipe you can",
-            "already craft with the materials you have, for as many as they'll make.", "Best profit first, so shared materials go to the recipe that earns the most." })
+        if b.none then return ShowTooltip(b, { "Have materials", ("Your materials don't make anything at %s%%+ profit right now."):format(PC:MinProfitPct()) }) end
+        ShowTooltip(b, { "Have materials", ("Plans every recipe making %s%%+ profit that your materials already cover, as many as"):format(PC:MinProfitPct()),
+            "they make (auction crafts only if they sold today).",
+            "Best profit first, so shared materials go to the top earner." })
     end)
     haveBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.haveBtn = haveBtn
@@ -982,7 +1080,19 @@ end
 -- Can you wear or wield it? Nothing on its tooltip in red (armor type, weapon skill, class, level)
 local function Red(c) return type(c) == "table" and (c.r or 0) > 0.9 and (c.g or 1) < 0.3 and (c.b or 1) < 0.3 end
 local gearTip
+-- Tooltips are slow to read, and Gear upgrades reads them for every piece you can make: whether you can
+-- wear an item (per level) and what an item gives are read once, not on every redraw
+local wearCache, statsCache = {}, {}
+-- a weapon skill or spell learned can clear a red tooltip line without a level-up
+local wearEv = CreateFrame("Frame")
+for _, e in ipairs({ "SKILL_LINES_CHANGED", "LEARNED_SPELL_IN_TAB" }) do pcall(wearEv.RegisterEvent, wearEv, e) end
+wearEv:SetScript("OnEvent", function() wipe(wearCache) end)
 function UI:CanWear(id)
+    local key = tostring(id) .. ":" .. tostring(UnitLevel and UnitLevel("player") or 0)
+    if wearCache[key] == nil then wearCache[key] = self:CanWearRaw(id) end -- (nil: not loaded yet, asked again)
+    return wearCache[key]
+end
+function UI:CanWearRaw(id)
     local name, _, _, minLevel = ItemInfo(id)
     if not name then return nil end
     if minLevel and UnitLevel and minLevel > (UnitLevel("player") or 1) then return false end
@@ -1032,6 +1142,10 @@ local function ArmorFromTooltip(link)
     return nil
 end
 function UI:ItemStats(link)
+    if link and statsCache[link] == nil then statsCache[link] = self:ItemStatsRaw(link) end
+    return link and statsCache[link]
+end
+function UI:ItemStatsRaw(link)
     local f = (C_Item and C_Item.GetItemStats) or GetItemStats
     if not f or not link then return nil end
     local ok, t = pcall(f, link)
@@ -1229,10 +1343,10 @@ function UI:PlanButtonStates()
     if c and now - c.t < 5 then return c end
     if not self.allEntries then self.allEntries = PC:Analyze() end
     local entries = self.allEntries or {}
-    -- Have materials: a profitable recipe your materials already make
+    -- Have materials: a recipe your materials already make, that it would recommend
     local have = false
     for _, e in ipairs(entries) do
-        if e.profit and e.profit > 0 and e.r and e.r.reagents and #e.r.reagents > 0 then
+        if PC:MeetsMin(e) and PC:SalesOK(e) and e.r and e.r.reagents and #e.r.reagents > 0 then
             local ok = true
             for _, rg in ipairs(e.r.reagents) do
                 if (PC:ReagentCount(rg) or 0) < (rg.n or 1) then ok = false break end
@@ -1297,10 +1411,11 @@ function UI:PlanFromBags()
         local e = byID[id]
         if e then for _, rg in ipairs(e.r.reagents) do use(rg, rg.n * n) end end
     end
-    -- then the most profitable recipes get what's left
+    -- then the most profitable recipes get what's left (only ones that make the minimum profit, and
+    -- for the AH only ones that sold there today: it's a recommendation)
     local list = {}
     for _, e in ipairs(self.allEntries or {}) do
-        if e.profit and e.profit > 0 then list[#list + 1] = e end
+        if PC:MeetsMin(e) and PC:SalesOK(e) then list[#list + 1] = e end
     end
     table.sort(list, function(a, b) return a.profit > b.profit end)
     local added, crafts = 0, 0
@@ -1327,7 +1442,7 @@ function UI:PlanFromBags()
         self.bagLimited = nil
     end
     if added == 0 then
-        PC.Print("Your materials don't make any more profitable crafts right now.")
+        PC.Print(("Your materials don't make any more crafts at %s%%+ profit right now."):format(PC:MinProfitPct()))
     else
         PC.Print(("Added %d recipe%s (%d crafts) you can make with the materials you have."):format(added, added == 1 and "" or "s", crafts))
     end
@@ -1446,14 +1561,21 @@ function UI:FillShopRows(list)
             if it.rank then nm = nm .. UI.QualityTag(it.rank, it.ranks, it.id) end
             row.name:SetText(nm)
             row.need:SetText(it.need)
-            -- what's on you, and how much of that is really in the bank
+            -- what's on you, and how much of it is really in the bank, in the mail or still on its way
             local inBank = PC.Bank and PC.Bank:Known() and PC.Bank:Count(it.id) or 0
-            local onYou = math.max(it.have - inBank, 0)
-            if inBank > 0 then
-                row.have:SetText(("%d |cff888888(%d bank)|r"):format(onYou, inBank))
+            local coming = PC.Buy:InFlight(it.id)
+            local inMail = PC:MailPending(it.id)
+            local onYou = math.max(it.have - inBank - coming - inMail, 0)
+            local extra = {}
+            if inBank > 0 then extra[#extra + 1] = inBank .. " bank" end
+            if inMail > 0 then extra[#extra + 1] = inMail .. " mail" end
+            if coming > 0 then extra[#extra + 1] = "|cffffd100" .. coming .. " coming|r" end
+            if #extra > 0 then
+                row.have:SetText(("%d |cff888888(%s)|r"):format(onYou, table.concat(extra, ", ")))
             else
                 row.have:SetText(it.have)
             end
+            local buyState = PC.Buy:StateFor(it.id)
             if it.craft then
                 if it.craft.disenchant then
                     -- short in the Buy column; the Total column says which green to make and disenchant
@@ -1463,6 +1585,10 @@ function UI:FillShopRows(list)
                     row.buy:SetText("|cff40c0ffmake " .. it.craft.n .. "|r")
                     row.total:SetText("|cff40c0ff(craft it: cheaper than buying)|r")
                 end
+            elseif coming > 0 or buyState == "buying" then
+                -- sent to the AH, waiting for its answer: counted as had, said as being bought
+                row.buy:SetText(("|cffffd100buying %d|r"):format(coming > 0 and coming or (PC.Buy.buy and PC.Buy.buy.qty or 0)))
+                row.total:SetText("")
             elseif it.buy == 0 then
                 row.buy:SetText("|cff40ff40ok|r")
                 row.total:SetText("")
@@ -1486,10 +1612,13 @@ function UI:FillShopRows(list)
                 row.buyItem = { id = it.id, name = PC:ItemName(it.id), qty = vqty, vendor = true }
             elseif state then
                 row.buyItem = { id = it.id, name = PC:ItemName(it.id), qty = PC.Buy.buy.qty }
-            elseif it.buy > 0 and it.src ~= "Vendor" and PC.Buy:CanBuy(it.id) and PC.Buy:AHQty(it.id, it.buy) > 0 then
-                -- items a vendor also sells: only what's listed at or below the vendor's price
-                local n = PC.Buy:AHQty(it.id, it.buy)
-                row.buyItem = { id = it.id, name = PC:ItemName(it.id), qty = n, vendorRest = it.buy - n }
+            elseif it.buy > 0 and it.src ~= "Vendor" and PC.Buy:CanBuy(it.id) and PC.Buy:AHQty(it.id, it.buy) > 0
+                and PC:ProfitableBuyQty(it.id, PC.Buy:AHQty(it.id, it.buy)) > 0 then
+                -- items a vendor also sells: only what's listed under the vendor's price; and only while
+                -- each keeps its craft at the minimum profit (a click works it all out again)
+                local ah = PC.Buy:AHQty(it.id, it.buy)
+                local n = PC:ProfitableBuyQty(it.id, ah)
+                row.buyItem = { id = it.id, name = PC:ItemName(it.id), qty = n, vendorRest = it.buy - ah, stopped = ah - n }
             elseif it.buy > 0 and it.src ~= "Vendor" and PC.Buy:ClassicAH() and PC.Buy:AHQty(it.id, it.buy) > 0 then
                 -- classic-style AH: the button runs the search; you click the buyout
                 local n = PC.Buy:AHQty(it.id, it.buy)
@@ -1516,12 +1645,14 @@ function UI:FillShopRows(list)
                 if state == "quoted" then
                     local b = PC.Buy.buy
                     btn:SetText((b.warn and "|cffff5555" or "|cff40ff40") .. PC:Money(b.total or 0, false, true) .. "|r")
+                elseif state == "buying" then
+                    btn:SetText("Buying...") -- (sent: it can't be taken back, only waited for)
                 elseif state then
                     btn:SetText("Cancel")
                 else
                     btn:SetText("Buy")
                 end
-                btn:SetEnabled(PC.ahOpen and true or false)
+                btn:SetEnabled((PC.ahOpen and state ~= "buying") and true or false)
             end
             row:Show()
         else
@@ -1533,12 +1664,48 @@ end
 function UI:UpdateShopping()
     if not self.planRows then return end
     self:UpdatePlanBar()
-    local entries = self:PlanEntries()
+    local entries = self:PlanEntries() -- (in name order: the materials list is worked out from this one)
+
+    -- AH and V Profit of each recipe's whole batch (the totals line needs them all); the rest only
+    -- for the rows on show, or for all of them when sorting by it
+    local profits, matsOf = {}, {}
+    for _, e in ipairs(entries) do profits[e] = { PC:BatchProfit(e, e.planCount) } end
+    local function Mats(e)
+        if matsOf[e] == nil then
+            local _, spend, missing = PC:ShoppingList(e, e.planCount)
+            matsOf[e] = (not missing) and spend or false
+        end
+        return matsOf[e] or nil
+    end
+    local shown = {}
+    for i, e in ipairs(entries) do shown[i] = e end
+    local editing = false
+    for _, row in ipairs(self.planRows) do if row.count:HasFocus() then editing = true end end
+    if editing and self.planOrder then
+        -- typing in a count box: the rows stay where they are until you're done
+        local pos = {}
+        for i, id in ipairs(self.planOrder) do pos[id] = i end
+        table.sort(shown, function(a, b) return (pos[a.id] or 1e9) < (pos[b.id] or 1e9) end)
+    else
+        local s = self:SortState("plan")
+        UI.SortRows(shown, s.key, s.dir, function(e, k)
+            if k == "name" then return e.r.name:lower() end
+            if k == "planCount" then return e.planCount end
+            if k == "craftable" then return (PC:Craftable(e)) end
+            if k == "mats" then return Mats(e) end
+            if k == "ahProfit" then return profits[e][1] end
+            if k == "vendorProfit" then return profits[e][2] end
+            if k == "matsMode" then return e.high and (e.mats == "high" and "top quality" or "cheapest") or nil end
+        end, function(e) return e.r.name:lower() end)
+    end
+    self.planOrder = {}
+    for i, e in ipairs(shown) do self.planOrder[i] = e.id end
+    self:PaintHeaders(self.planHeaders, "plan")
 
     -- plan rows
-    self.planOffset = math.min(math.max(self.planOffset or 0, 0), math.max(#entries - PLAN_ROWS, 0))
+    self.planOffset = math.min(math.max(self.planOffset or 0, 0), math.max(#shown - PLAN_ROWS, 0))
     for i, row in ipairs(self.planRows) do
-        local e = entries[i + self.planOffset]
+        local e = shown[i + self.planOffset]
         row.entry = e
         if e then
             row.icon:SetTexture(ItemIcon(e.outID or e.r.output))
@@ -1550,10 +1717,13 @@ function UI:UpdateShopping()
             SetSkillArrows(row, e.r.diff)
             row.craft.recipeID, row.craft.recipe = e.id, e.r
             if not row.count:HasFocus() then row.count:SetText(tostring(e.planCount)) end
-            local _, spend, missing = PC:ShoppingList(e, e.planCount)
-            row.mats:SetText(missing and "|cffff5555?|r" or PC:Money(spend, false, true))
-            row.profit:SetText((e.profit and PC:Money(e.profit * e.planCount, true, true) or "|cff888888?|r")
-                .. (e.route == "Vendor" and " |cff40c0ffV|r" or ""))
+            local c, pr = row.cell, profits[e]
+            FitCell(c.craftable, (UI.CraftableCells(e)))
+            local m = Mats(e)
+            FitCell(c.mats, m and PC:Money(m) or "|cffff5555?|r")
+            FitCell(c.ahProfit, PC:Money(pr[1], true))
+            -- blue: it's sold to a vendor
+            FitCell(c.vendorProfit, (e.route == "Vendor" and pr[2] and pr[2] > 0) and ("|cff40c0ff" .. PC:Money(pr[2]) .. "|r") or PC:Money(pr[2], true))
             if PC.Craft:IsOpenFor(e.r) then
                 -- at this profession's window: craft instead of choosing materials
                 row.matsBtn:Hide()
@@ -1578,14 +1748,30 @@ function UI:UpdateShopping()
     self.planEmpty:SetText(#entries == 0 and
         ("\"%s\" is empty.\nOn the Recipes tab, click the bag icon next to a recipe, pick how many, and Add to plan."):format(PC:PlanName()) or "")
 
-    -- combined materials
+    -- combined materials (sorted on a copy: the list is shared with the buying and the Task Button)
     local list, total, missing = PC:CombinedShoppingList(entries, 1)
-    self:FillShopRows(list)
+    local mats = {}
+    for i, it in ipairs(list) do mats[i] = it end
+    local ms = self:SortState("mats")
+    local function MatName(it) return (PC:ItemName(it.id) or ""):lower() end
+    UI.SortRows(mats, ms.key, ms.dir, function(it, k)
+        if k == "name" then return MatName(it) end
+        if k == "each" then return it.unit end
+        if k == "total" then return ((it.buy or 0) > 0 and not it.craft) and it.sub or nil end -- (made or had: nothing to pay)
+        return it[k]
+    end, MatName)
+    self:PaintHeaders(self.matHeaders, "mats")
+    self.matData = mats
+    self:FillShopRows(mats)
     self.shopEmpty:SetText("")
 
-    local profit, unknown = 0, 0
+    -- the whole plan's AH and V Profit (recipes with no price at all are counted apart)
+    local ahT, vT, nAH, nV, unknown = 0, 0, 0, 0, 0
     for _, e in ipairs(entries) do
-        if e.profit then profit = profit + e.profit * e.planCount else unknown = unknown + 1 end
+        local pr = profits[e]
+        if pr[1] then ahT, nAH = ahT + pr[1], nAH + 1 end
+        if pr[2] then vT, nV = vT + pr[2], nV + 1 end
+        if not pr[1] and not pr[2] then unknown = unknown + 1 end
     end
     local money = PC:Gold()
     local b, msg = PC.Buy.buy, PC.Buy:Message()
@@ -1601,17 +1787,11 @@ function UI:UpdateShopping()
     elseif #entries == 0 then
         self.shopSummary:SetText("")
     else
-        local spendText = missing and "|cffff5555unknown|r" or ((total > money and "|cffff5555" or "|cffffffff") .. PC:Money(total, false, true) .. "|r")
-        self.shopSummary:SetText(("Spend %s  " .. UI.DIM .. "(you have %s)|r   Profit %s%s"):format(
-            spendText, PC:Money(money, false, true), PC:Money(profit, true, true),
+        local spendText = missing and "|cffff5555unknown|r" or ((total > money and "|cffff5555" or "|cffffffff") .. PC:Money(total) .. "|r")
+        self.shopSummary:SetText(("Spend %s  " .. UI.DIM .. "(you have %s)|r   Auction Profit %s   Vendor Profit %s%s"):format(
+            spendText, PC:Money(money), nAH > 0 and PC:Money(ahT, true) or PC:Money(nil), nV > 0 and PC:Money(vT, true) or PC:Money(nil),
             unknown > 0 and " " .. UI.DIM .. "(+" .. unknown .. " unpriced)|r" or ""))
     end
-    -- Next step
-    local step = PC.Next:Compute()
-    local nb = self.nextBtn
-    nb.tip = step.tip
-    UI.FitText(nb, step.text or "Next task")
-    nb:SetEnabled(step.run ~= nil)
     self.shopClear:SetEnabled(#entries > 0)
 end
 
@@ -1658,7 +1838,7 @@ function UI:PlanBuyList(list)
     for _, it in ipairs(list) do
         if it.buy and it.buy > 0 and it.src ~= "Vendor" and not later[it.id] then
             local want = it.buy
-            local n = want > 0 and PC.Buy:AHQty(it.id, want) or 0 -- vendor items: only at or below the vendor's price
+            local n = want > 0 and PC.Buy:AHQty(it.id, want) or 0 -- vendor items: only under the vendor's price
             if n > 0 then out[#out + 1] = { id = it.id, name = PC:ItemName(it.id), qty = n } end
         end
     end
@@ -1695,7 +1875,7 @@ function UI:CreatePlanBar(p)
     local rename = Btn("Rename", 72, "rename", new)
     self.planDelete = Btn("Delete", 64, "delete", rename)
     local gold = UI.GreenButton(p, 118, 22, "Make me gold")
-    gold:SetPoint("TOPRIGHT", p, "TOPLEFT", 768, -62)
+    gold:SetPoint("TOPRIGHT", p, "TOPLEFT", 12 + PW, -62)
     gold:SetScript("OnClick", function() PC:Safe("make me gold", PC.MakeGold.Open, PC.MakeGold) end)
     gold:SetScript("OnEnter", function(b)
         ShowTooltip(b, { "Make me gold", "Builds a plan with the best crafts that fit your spending limit",
@@ -1706,7 +1886,7 @@ function UI:CreatePlanBar(p)
     gold:Hide() -- Make me gold now hangs off the side with the tabs
     self.planInfo = UI.Ink(p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"), true)
     self.planInfo:SetPoint("LEFT", self.planDelete, "RIGHT", 10, 0)
-    self.planInfo:SetPoint("RIGHT", p, "TOPLEFT", 768, 0)
+    self.planInfo:SetPoint("RIGHT", p, "TOPLEFT", 12 + PW, -72) -- (level with the plan bar's buttons, like its left end)
     self.planInfo:SetJustifyH("RIGHT")
     self.planInfo:SetWordWrap(false)
 

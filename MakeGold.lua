@@ -255,7 +255,11 @@ function Gold:Build(budget, minSold)
     if not UI.allEntries then UI.allEntries = PC:Analyze() end
     local cands = {}
     for _, e in ipairs(UI.allEntries) do
-        if e.profit and e.profit > 0 and e.cost and e.cost > 0 and not (PC.Learn and PC.Learn:Avoided(e.id))
+        -- at least the minimum profit, and nothing for the AH that nobody bought there today
+        -- (and for the AH, at least half as many sold today as are listed: else it won't sell in time)
+        if e.profit and e.profit > 0 and e.cost and e.cost > 0 and PC:MeetsMin(e) and PC:SalesOK(e)
+            and (PC:SellThrough(e))
+            and not (PC.Learn and PC.Learn:Avoided(e.id))
             and not (self.skip and self.skip.pick[e.id]) then
             local perDay = self:SoldPerDay(e)
             local ok = e.route == "Vendor" or (minSold or 0) <= 0 or (perDay and perDay >= minSold)
@@ -273,7 +277,8 @@ function Gold:Build(budget, minSold)
                     local own = self:OwnCap(e.outID or e.r.output)
                     if own then cap = math.min(cap, own) end
                 end
-                if cap > 0 then cands[#cands + 1] = { e = e, cap = math.min(cap, e.route == "Vendor" and self.FLIP_MAX or 200), perDay = perDay } end
+                local _, hot = PC:SellThrough(e)
+                if cap > 0 then cands[#cands + 1] = { e = e, cap = math.min(cap, e.route == "Vendor" and self.FLIP_MAX or 200), perDay = perDay, hot = hot } end
             end
         end
     end
@@ -285,7 +290,11 @@ function Gold:Build(budget, minSold)
         local pen = PC.Learn and PC.Learn:Penalty(c.e.outID or (c.e.r and c.e.r.output)) or 0
         return c.e.profit / c.e.cost * self:Turnover(c) * (1 - pen)
     end
-    table.sort(cands, function(a, b) return score(a) > score(b) end)
+    -- hot sellers (more sold today than listed) first, each group by that score
+    table.sort(cands, function(a, b)
+        if (a.hot and true or false) ~= (b.hot and true or false) then return a.hot and true or false end
+        return score(a) > score(b)
+    end)
     local picks, chosen = {}, {}
     self.bagLimited = nil
     local free = PC:FreeBagSlots()
@@ -303,7 +312,9 @@ function Gold:Build(budget, minSold)
     for _, c in ipairs(cands) do
         local pick = { e = c.e, n = 0, perDay = c.perDay }
         chosen[#chosen + 1] = pick
-        local lo, hi = 0, c.cap
+        -- no more than the materials can be bought for while each craft still clears the minimum profit
+        local most = PC:CraftableAtMin(c.e, math.huge)
+        local lo, hi = 0, math.min(c.cap, most or c.cap)
         while lo < hi do -- most crafts of this recipe that still fit the gold and your bags
             local mid = math.floor((lo + hi + 1) / 2)
             pick.n = mid
@@ -324,7 +335,10 @@ function Gold:Build(budget, minSold)
     local total = costOf(chosen)
     local profit = 0
     for _, p in ipairs(picks) do
-        p.profit = p.e.profit * p.n
+        -- the whole batch's materials priced up the listings, not just the cheapest one
+        local ah, v, routed = PC:BatchProfit(p.e, p.n)
+        p.ahProfit, p.vProfit = ah, v
+        p.profit = routed or p.e.profit * p.n
         profit = profit + p.profit
         p.cost = costOf({ p })
     end
@@ -338,7 +352,7 @@ function Gold:Open()
     local w = self.win
     if not w then
         w = CreateFrame("Frame", "ProfitCrafterMakeGold", UI.f, "BackdropTemplate")
-        w:SetSize(700, 368)
+        w:SetSize(840, 368) -- (wide enough for both profits on every line)
         w:SetPoint("CENTER", UI.f, "CENTER")
         w:SetFrameStrata("DIALOG")
         w:EnableMouse(true)
@@ -433,10 +447,19 @@ function Gold:Update()
     local left, mats, sells = self:Carrying(room), self:MatCrafts(picks, room), nil
     sells = self:MatSells(picks, mats, left, room)
     self.left, self.mats, self.sells = left, mats, sells
-    local words = { post = "|cff40c0ffpost on the AH|r", disenchant = "|cffc080ffdisenchant for dust|r", vendor = "|cffffd100sell to a vendor|r" }
+    local words = { post = "|cff40c0ffpost at auction|r", disenchant = "|cffc080ffdisenchant for dust|r", vendor = "|cffffd100sell to a vendor|r" }
     local function routeWords(e)
         local route = e.route
         return (route == "Vendor" and words.vendor) or (route == "Disenchant" and words.disenchant) or words.post
+    end
+    -- both profits for a line: on the AH and to a vendor (the way it's sold in white, the other dimmed)
+    local function profits(x)
+        local function one(label, v, used)
+            local txt = v and PC:Money(v, true, true) or "|cff888888n/a|r"
+            return (used and "|cffffffff" or "|cff888888") .. label .. "|r " .. txt
+        end
+        local vendor = x.e.route == "Vendor"
+        return one("Auction Profit", x.ahProfit, not vendor) .. "  " .. one("Vendor Profit", x.vProfit, vendor)
     end
     local n, y = 0, -130
     local function line(text, kind, key)
@@ -468,8 +491,8 @@ function Gold:Update()
         for _, p in ipairs(picks) do
             local listed = PC:Supply()[p.e.outID or p.e.r.output]
             local sells = p.perDay and ("|cff888888~%d/day, %s listed|r"):format(math.floor(p.perDay + 0.5), listed and tostring(listed) or "?") or "|cff888888sales unknown|r"
-            line(("%s  |cffffffffx%d|r  %s   %s   |cff888888cost|r %s   |cff40ff40+%s|r"):format(p.e.r.name, p.n, routeWords(p.e), sells,
-                PC:Money(p.cost or 0, false, true), PC:Money(p.profit or 0, false, true)), "pick", p.e.id)
+            line(("%s  |cffffffffx%d|r  %s   %s   |cff888888cost|r %s   %s"):format(p.e.r.name, p.n, routeWords(p.e), sells,
+                PC:Money(p.cost or 0, false, true), profits(p)), "pick", p.e.id)
         end
         y = y - 6
     end
@@ -478,7 +501,7 @@ function Gold:Update()
         line("|cffffd100Your materials|r")
         for _, m in ipairs(mats) do
             profit = profit + (m.profit or 0)
-            line(("%s  |cffffffffx%d|r  %s   |cff888888nothing to buy|r   |cff40ff40+%s|r"):format(m.e.r.name, m.n, routeWords(m.e), PC:Money(m.profit or 0, false, true)), "mat", m.e.id)
+            line(("%s  |cffffffffx%d|r  %s   |cff888888nothing to buy|r   %s"):format(m.e.r.name, m.n, routeWords(m.e), profits(m)), "mat", m.e.id)
         end
         for _, l in ipairs(sells) do
             sellValue = sellValue + (l.each or 0) * l.n
@@ -487,7 +510,7 @@ function Gold:Update()
         y = y - 6
     end
     if n == 0 then
-        line("|cff888888Nothing fits yet. Scan the AH a few times so sales can be estimated, or lower the \"sells a day\" number.|r")
+        line("|cff888888Nothing fits yet. Scan the Auction House a few times so sales can be estimated, or lower the \"sells a day\" number.|r")
     end
     for i = n + 1, #w.lines do w.lines[i]:Hide() end
     w:SetHeight(math.max(368, -y + 80))
@@ -496,7 +519,19 @@ function Gold:Update()
     local any = #picks > 0 or #mats > 0 or #left > 0 or #sells > 0
     local parts = {}
     if #picks > 0 then parts[#parts + 1] = ("Total %s"):format(PC:Money(total, false, true)) end
-    if profit > 0 then parts[#parts + 1] = ("profit |cff40ff40+%s|r"):format(PC:Money(profit, false, true)) end
+    if #picks + #mats > 0 then
+        -- both ways for everything listed, and what the plan makes selling each the way it's marked
+        local ah, v, anyAH, anyV = 0, 0, false, false
+        for _, list in ipairs({ picks, mats }) do
+            for _, x in ipairs(list) do
+                if x.ahProfit then ah, anyAH = ah + x.ahProfit, true end
+                if x.vProfit then v, anyV = v + x.vProfit, true end
+            end
+        end
+        parts[#parts + 1] = ("Auction Profit %s  Vendor Profit %s  |cff888888(as planned %s)|r"):format(
+            anyAH and PC:Money(ah, true, true) or "|cff888888n/a|r", anyV and PC:Money(v, true, true) or "|cff888888n/a|r",
+            PC:Money(profit, true, true))
+    end
     if sellValue > 0 then parts[#parts + 1] = ("selling about |cff40ff40%s|r"):format(PC:Money(sellValue, false, true)) end
     w.total:SetText(any and (table.concat(parts, "  " .. PC.ARROW_R .. "  ") .. (#picks > 0 and bags or ""))
         or (self.bagLimited and ("|cffff8040Nothing fits in your bags (%d free slots).|r"):format(self.slotsFree or 0) or ""))
@@ -590,6 +625,7 @@ function Gold:MatCrafts(picks, room)
     local list = {}
     for _, e in ipairs(UI.allEntries or {}) do
         if e.profit and e.profit > 0 and e.r and e.r.reagents and #e.r.reagents > 0 and not taken[e.id]
+            and PC:MeetsMin(e) and PC:SalesOK(e) and (PC:SellThrough(e))
             and not self.skip.mat[e.id] and not (PC.Learn and PC.Learn:Avoided(e.id)) then
             list[#list + 1] = e
         end
@@ -620,7 +656,8 @@ function Gold:MatCrafts(picks, room)
             end
             if fits then
                 for _, rg in ipairs(e.r.reagents) do use(rg, (rg.n or 1) * can) end
-                out[#out + 1] = { e = e, n = can, profit = e.profit * can }
+                out[#out + 1] = { e = e, n = can, profit = e.profit * can,
+                    ahProfit = e.ahProfit and e.ahProfit * can, vProfit = e.vendorProfit and e.vendorProfit * can }
                 if #out >= self.MAX_MATS then break end
             end
         end
@@ -720,6 +757,8 @@ end
 -- "A buyer has been found for your auction of %s." as a pattern (the game's own text, any language)
 local soldPattern
 local function SoldName(msg)
+    -- (a message the game keeps secret, in combat for one, can't be read: never an error)
+    if type(msg) ~= "string" or PC.IsSecret(msg) then return nil end
     if not soldPattern then
         local s = ERR_AUCTION_SOLD_S or "A buyer has been found for your auction of %s."
         s = s:gsub("%%", "%%%%"):gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1"):gsub("%%%%s", "(.+)")
@@ -740,6 +779,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2, ...)
             C_Timer.After(3, function() Safe("undercut", Undercut.OnArrive, Undercut) end)
         elseif event == "UI_ERROR_MESSAGE" then
             local msg = type(arg2) == "string" and arg2 or arg1
+            if PC.IsSecret(msg) then return end -- kept secret by the game right now: can't be read
             -- bags filled mid-batch ("Inventory is full"): the batch is over
             if Craft.quick and Craft.quick.started and type(msg) == "string"
                 and (msg == (ERR_INV_FULL or "Inventory is full.") or msg:lower():find("inventory is full", 1, true)) then

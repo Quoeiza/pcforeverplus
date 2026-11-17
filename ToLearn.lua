@@ -14,6 +14,9 @@ local PC = ns.PC
 local ToLearn = {}
 PC.ToLearn = ToLearn
 
+-- a required material slot (the same test Core.lua uses when it reads your recipes)
+local BASIC_REAGENT = (Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic) or 1
+
 ToLearn.SOON_LEVELS = 10   -- "soon": within this many character levels
 ToLearn.SOON_SKILL = 40    -- ...and within this much profession skill
 ToLearn.ALL_DB = true      -- WoW Forever: list every classic recipe for your professions, seen or not
@@ -26,13 +29,21 @@ ToLearn.SUBCLASS = { [1] = "Leatherworking", [2] = "Tailoring", [3] = "Engineeri
 local PREFIXES = { "Pattern", "Plans", "Recipe", "Formula", "Schematic", "Manual", "Design", "Technique", "Book" }
 
 -- "Pattern: Red Linen Robe" -> "red linen robe"
+-- (asked thousands of times for every list: each name is worked out once and kept)
+local normCache, normN = {}, 0
 function ToLearn:Norm(name)
-    name = (name or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    name = name or ""
+    local n = normCache[name]
+    if n then return n end
+    n = name:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
     for _, p in ipairs(PREFIXES) do
-        local rest = name:match("^" .. p .. ":%s*(.+)$")
-        if rest then name = rest break end
+        local rest = n:match("^" .. p .. ":%s*(.+)$")
+        if rest then n = rest break end
     end
-    return name:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    n = n:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if normN >= 20000 then wipe(normCache); normN = 0 end
+    normCache[name], normN = n, normN + 1
+    return n
 end
 
 local function Data()
@@ -181,7 +192,29 @@ local function TipLines(itemID)
 end
 
 -- { prof, skill, level, known, name } for a recipe item, or nil (not a recipe / not loaded yet)
-function ToLearn:RecipeItem(itemID)
+-- Every item every vendor sells is asked about each time the Learn list is made: the answers are kept.
+-- Not a recipe: kept for good. A recipe: kept until something is learned (only learning changes "Already
+-- known"). fresh = read its tooltip again (buying, and checking the trip for recipes learned meanwhile).
+ToLearn.riNot, ToLearn.riAll = {}, {}
+function ToLearn:RecipeItem(itemID, fresh)
+    if itemID == nil then return self:RecipeItemRaw(itemID) end
+    if self.riNot[itemID] then return nil end
+    local c = not fresh and self.riAll[itemID]
+    if c then return c end
+    local r, final = self:RecipeItemRaw(itemID)
+    if r then self.riAll[itemID] = r elseif final then self.riNot[itemID] = true end
+    return r
+end
+-- something was learned: the recipes are read again (what isn't a recipe stays known)
+function ToLearn:ForgetRecipeItems() self.riAll = {} end
+
+function ToLearn:RecipeItemRaw(itemID)
+    -- not a recipe at all: the game says so without loading the item (no load asked for)
+    local inst = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    if inst and itemID then
+        local ok, _, _, _, _, _, cls = pcall(inst, itemID)
+        if ok and cls and cls ~= 9 then return nil, true end
+    end
     local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
     if not getInfo then return nil end
     local name, _, _, _, minLevel, _, _, _, _, _, _, classID, subclassID = getInfo(itemID)
@@ -189,7 +222,7 @@ function ToLearn:RecipeItem(itemID)
         if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, itemID) end
         return nil
     end
-    if classID ~= 9 then return nil end
+    if classID ~= 9 then return nil, true end
     local r = { name = name, level = (minLevel and minLevel > 1) and minLevel or nil, prof = self.SUBCLASS[subclassID] }
     local known = ITEM_SPELL_KNOWN or "Already known"
     for _, line in ipairs(TipLines(itemID)) do
@@ -198,7 +231,7 @@ function ToLearn:RecipeItem(itemID)
         if line == known then r.known = true end
     end
     if r.prof == "Book" then r.prof = nil end
-    return r
+    return r, true
 end
 
 ---------------------------------------------------------------------------
@@ -239,12 +272,12 @@ local function MyProfs()
     return out
 end
 
--- Profit per craft for a recipe we know the parts of
+-- Profit per craft for a recipe we know the parts of: the way it's sold, the cost, AH Profit, V Profit
 local function ProfitOf(e)
     if not e.output or not e.reagents or #e.reagents == 0 or not PC.Evaluate then return nil end
     local r = { name = e.name, output = e.output, qty = e.qty or 1, reagents = e.reagents }
     local ok, ev = pcall(PC.Evaluate, PC, r, "low")
-    if ok and ev then return ev.profit, ev.cost end
+    if ok and ev then return ev.profit, ev.cost, ev.ahProfit, ev.vendorProfit end
     return nil
 end
 
@@ -272,9 +305,36 @@ function ToLearn:List()
             if n ~= "" and p.map and not self.placeByName[n] then self.placeByName[n] = p end
         end
     end
-    local list = self:ListRaw()
+    -- (prices, bags and the plan can't change while it's made: what each recipe's profit asks for, like the
+    -- cheapest way to make dust, is worked out once for the whole list, inside a refresh or not)
+    local list = PC:WithMemo(self.ListRaw, self)
     self.listCache = { t = now, list = list, sig = sig }
     return list
+end
+
+-- Where you are, worked out once for a whole list (it was asked of the game for every recipe):
+-- { map, zone, mine = your faction's letter }
+function ToLearn:Where()
+    local at = {}
+    if PC.Places and PC.Places.Here then
+        local m, _, _, z = PC.Places:Here()
+        at.map, at.zone = m, z
+    end
+    at.mine = UnitFactionGroup and ({ Alliance = "A", Horde = "H" })[UnitFactionGroup("player") or ""] or nil
+    return at
+end
+
+-- The recipe data's keys split once ("Tailoring:runecloth belt" -> profession, name), in the data's own order
+local dbKeys
+local function DBKeys()
+    if not dbKeys then
+        dbKeys = {}
+        for key in pairs(PC.RecipeDB or {}) do
+            local prof, norm = key:match("^([^:]+):(.+)$")
+            if prof then dbKeys[#dbKeys + 1] = { key, prof, norm } end
+        end
+    end
+    return dbKeys
 end
 
 function ToLearn:ListRaw()
@@ -283,13 +343,15 @@ function ToLearn:ListRaw()
     local profs = MyProfs()
     local known = KnownNames()
     local level = UnitLevel and UnitLevel("player") or 1
+    local at = self:Where()
     local byKey, out = {}, {}
     local function add(prof, name, fields)
         if not prof or not profs[prof] then return end
-        local key = prof .. ":" .. self:Norm(name)
-        if known[self:Norm(name)] or d.skip[key] then return end
+        local norm = self:Norm(name)
+        local key = prof .. ":" .. norm
+        if known[norm] or d.skip[key] then return end
         -- a spell you already have (Disenchant)
-        if not byKey[key] and fields.source == "Trainer" and SpellKnown(name) then known[self:Norm(name)] = true return end
+        if not byKey[key] and fields.source == "Trainer" and SpellKnown(name) then known[norm] = true return end
         local e = byKey[key]
         if not e then
             e = { key = key, name = name, prof = prof }
@@ -300,8 +362,8 @@ function ToLearn:ListRaw()
     end
     -- 1) vendors we know (and what they stock): exact spots
     if PC.Places then
-        for _, p in pairs(PC.Places:All()) do
-            if p.kind == "vendor" and p.stock then
+        for _, p in ipairs(PC.Places:OfKind("vendor")) do
+            if p.stock then
                 for id in pairs(p.stock) do
                     local ri = self:RecipeItem(id)
                     if ri and not ri.known and ri.prof then
@@ -315,19 +377,15 @@ function ToLearn:ListRaw()
     -- 2) trainers: what they teach (and at what skill); yours first, then lists other players shared
     -- (every city's trainers teach the same: a trainer of that profession where you are now beats
     -- the one the list was read from, so you're never sent to another city to train)
-    local hereMap, hereZone
-    if PC.Places and PC.Places.Here then
-        local m, _, _, z = PC.Places:Here()
-        hereMap, hereZone = m, z
-    end
+    local hereMap, hereZone = at.map, at.zone
     local function isHere(p) return p and ((hereMap and p.map == hereMap) or (hereZone and hereZone ~= "" and p.zone == hereZone)) end
     local hereTrainer = {}
     local function trainerHere(prof)
         if hereTrainer[prof] == nil then
             hereTrainer[prof] = false
             if (hereMap or hereZone) and PC.Places then
-                for _, p in pairs(PC.Places:All()) do
-                    if p.kind == "trainer" and ToLearn.TeachesProf(p, prof) and isHere(p) then hereTrainer[prof] = p break end
+                for _, p in ipairs(PC.Places:OfKind("trainer")) do
+                    if ToLearn.TeachesProf(p, prof) and isHere(p) then hereTrainer[prof] = p break end
                 end
             end
         end
@@ -375,7 +433,7 @@ function ToLearn:ListRaw()
     -- 5) the recipe data: Retail (by recipe) or classic (by name, WoW Forever)
     for recipeID, u in pairs(d.unlearned) do
         local src = u.src or {}
-        local f = PC.RecipeDBRetail and self:FromRetailDB(recipeID, src.where) or (u.prof and u.name and self:FromDB(u.prof, u.name))
+        local f = PC.RecipeDBRetail and self:FromRetailDB(recipeID, src.where) or (u.prof and u.name and self:FromDB(u.prof, u.name, at))
         if f then
             add(u.prof, u.name, { recipeID = recipeID, source = f.source, where = f.where, zone = f.zone, skill = f.skill,
                 level = f.level, cost = f.cost, costText = f.costText, costx = f.costx, req = f.req, rep = f.rep, place = f.place, itemID = f.itemID, output = u.output,
@@ -386,10 +444,10 @@ function ToLearn:ListRaw()
     end
     -- 6) WoW Forever: every classic recipe for your professions, seen or not (the game doesn't list them)
     if self.ALL_DB and PC.RecipeDB and not PC.RecipeDBRetail then
-        for key, r in pairs(PC.RecipeDB) do
-            local prof, norm = key:match("^([^:]+):(.+)$")
-            if prof and profs[prof] and not known[norm] and not byKey[key] and not d.skip[key] then
-                local f = self:FromDB(prof, norm)
+        for _, k in ipairs(DBKeys()) do
+            local key, prof, norm = k[1], k[2], k[3]
+            if profs[prof] and not known[norm] and not byKey[key] and not d.skip[key] then
+                local f = self:FromDB(prof, norm, at)
                 if f then
                     add(prof, self:Title(norm), { source = f.source, where = f.where, zone = f.zone, skill = f.skill, level = f.level,
                         cost = f.cost, req = f.req, rep = f.rep, place = f.place, itemID = f.itemID, srcText = f.text, seasonOff = f.seasonOff })
@@ -399,16 +457,44 @@ function ToLearn:ListRaw()
     end
     -- profit, status, can you afford it
     local money = GetMoney and GetMoney() or 0
+    local unlearnedByName -- [prof][name] = the first unlearned entry with that name (looked through once, not per row)
     for _, e in ipairs(out) do
         if not e.cost and e.costText then e.cost = self:ParseMoney(e.costText) end
         e.cantAfford = e.cost and e.cost > money or nil
         -- the unlearned list knows what it makes: borrow that for a vendor/trainer row with the same name
         if not e.output then
-            for _, u in pairs(d.unlearned) do
-                if u.prof == e.prof and self:Norm(u.name) == self:Norm(e.name) then e.output, e.reagents, e.qty = u.output, u.reagents, u.qty break end
+            if not unlearnedByName then
+                unlearnedByName = {}
+                for _, u in pairs(d.unlearned) do
+                    if u.prof ~= nil then
+                        local t = unlearnedByName[u.prof]
+                        if not t then t = {}; unlearnedByName[u.prof] = t end
+                        local n = self:Norm(u.name)
+                        if t[n] == nil then t[n] = u end
+                    end
+                end
             end
+            local u = unlearnedByName[e.prof] and unlearnedByName[e.prof][self:Norm(e.name)]
+            if u then e.output, e.reagents, e.qty = u.output, u.reagents, u.qty end
         end
-        e.profit = ProfitOf(e)
+        -- (matsCost: what one craft's materials cost; e.cost stays what the recipe itself costs to buy)
+        e.profit, e.matsCost, e.ahProfit, e.vendorProfit = ProfitOf(e)
+        -- nobody known to sell, teach or drop it and no price for it: too little known for a profit
+        if not (e.where and e.where ~= "") and not e.cost and not e.costText and not e.currency then
+            e.profit, e.matsCost, e.ahProfit, e.vendorProfit, e.noSource = nil, nil, nil, nil, true
+        end
+        -- an AH price it's worked out from that's more than OLD_PRICE old (not seen in recent scans): marked ~
+        e.ahAge, e.vAge = nil, nil
+        if e.ahProfit or e.vendorProfit then
+            local mats = 0
+            for _, rg in ipairs(e.reagents or {}) do
+                local id, _, src = PC:ReagentFor(rg, "low")
+                if src == "AH" then mats = math.max(mats, PC:PriceAge(id) or 0) end
+            end
+            local ah = math.max(mats, PC:PriceAge(e.output) or 0)
+            if e.ahProfit and ah > PC.OLD_PRICE then e.ahAge = ah end
+            if e.vendorProfit and mats > PC.OLD_PRICE then e.vAge = mats end
+        end
         -- bought with something other than gold (badges, tokens, marks...): how much, and do you have it
         local need = self:SpecialCost(e)
         if need then
@@ -583,12 +669,13 @@ function ToLearn:TrainerSpots(prof)
 end
 
 -- Where the data says a recipe comes from: { source, where, zone, skill, level, cost, place, itemID, text } or nil
-function ToLearn:FromDB(prof, name)
+function ToLearn:FromDB(prof, name, at)
     local db = PC.RecipeDB
     local r = db and db[prof .. ":" .. self:Norm(name)]
     if not r then return nil end
+    at = at or self:Where()
     local skill, level, item, kind, cost, spots = r[1], r[2], r[3], r[4], r[5], r[6] or {}
-    local mine = UnitFactionGroup and ({ Alliance = "A", Horde = "H" })[UnitFactionGroup("player") or ""] or nil
+    local mine = at.mine
     -- spots your faction can use (a neutral one counts for both), and holiday vendors only during the holiday
     local ok, offSeason = {}, nil
     for _, sp in ipairs(spots) do
@@ -611,7 +698,7 @@ function ToLearn:FromDB(prof, name)
     local f = { source = kind, skill = skill, level = (level or 0) > 0 and level or nil, cost = cost, itemID = item }
     local first = ok[1]
     -- the nearest one you can reach: one in the zone you're in first
-    local here = PC.Places and select(4, PC.Places:Here()) or nil
+    local here = at.zone
     if here then for _, sp in ipairs(ok) do if sp[2] == here then first = sp break end end end
     local function Name(sp)
         if sp[1] ~= "" then return sp[1] end
@@ -630,9 +717,12 @@ function ToLearn:FromDB(prof, name)
         end
         local p = self:NearestTrainer(prof)
         if first and here and first[2] == here then p = nil end -- the one here wins
-        local hereMap = PC.Places and PC.Places:Here() or nil
-        local inCity = hereMap and PC.Travel and ((PC.Travel.CITIES and PC.Travel.CITIES[hereMap])
-            or (PC.Travel.IsCityMap and PC.Travel:IsCityMap(hereMap)))
+        local hereMap = at.map
+        if at.inCity == nil then
+            at.inCity = (hereMap and PC.Travel and ((PC.Travel.CITIES and PC.Travel.CITIES[hereMap])
+                or (PC.Travel.IsCityMap and PC.Travel:IsCityMap(hereMap)))) and true or false
+        end
+        local inCity = at.inCity
         if p and here and p.map ~= hereMap and p.zone ~= here and inCity and not (first and first[2] == here) then
             -- every city has every trainer: the one here (no arrow until you've been to it once)
             f.where, f.zone = ("%s trainer here in %s"):format(prof, here), here
@@ -1249,7 +1339,7 @@ function ToLearn:CheckTripKnown(byKey)
     for _, k in ipairs(Data().trip) do
         local e = byKey[k]
         if e and e.itemID then
-            local ri = self:RecipeItem(e.itemID)
+            local ri = self:RecipeItem(e.itemID, true)
             if ri and ri.known then
                 PC.cdb.learnedNames = PC.cdb.learnedNames or {}
                 PC.cdb.learnedNames[self:Norm(e.name)] = true
@@ -1331,7 +1421,7 @@ function ToLearn:LearnStep()
     local now = GetTime and GetTime() or 0
     for _, b in ipairs(PC.BagSlots()) do
         local c = self.riCache[b.id]
-        if not c or now - c.t > 30 then c = { t = now, r = self:RecipeItem(b.id) or false }; self.riCache[b.id] = c end
+        if not c or now - c.t > 30 then c = { t = now, r = self:RecipeItem(b.id, true) or false }; self.riCache[b.id] = c end
         local ri = c.r
         if ri and not ri.known and ri.prof and profs[ri.prof] and not b.locked then
             local rank = profs[ri.prof].rank or 0
@@ -1433,7 +1523,7 @@ function ToLearn:OfferRecipes()
     local asked, missing = 0, 0
     for i = 1, GetMerchantNumItems() or 0 do
         local id = GetMerchantItemID(i)
-        local ri = id and self:RecipeItem(id)
+        local ri = id and self:RecipeItem(id, true)
         -- item details not loaded yet: look again in a moment
         if id and not ri then
             local inst = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
@@ -1522,7 +1612,7 @@ function ToLearn:Step()
                 s.tip = "Then the Task Button learns it (or it goes to the bank until you can)."
                 s.run = function()
                     -- bought the same way as the vendor offers: one you can't learn yet waits in the bank
-                    local ri = ToLearn:RecipeItem(e.itemID)
+                    local ri = ToLearn:RecipeItem(e.itemID, true)
                     local price = MerchantPrice(i)
                     if ri and price then ToLearn:BuyRecipe(e.itemID, ri, price) else BuyMerchantItem(i, 1) end
                 end
@@ -1578,7 +1668,7 @@ for _, e in ipairs({ "PLAYER_LOGIN", "TRAINER_SHOW", "PLAYER_LEVEL_UP", "MERCHAN
     "LEARNED_SPELL_IN_TAB", "SPELLS_CHANGED", "SKILL_LINES_CHANGED" }) do pcall(ev.RegisterEvent, ev, e) end
 -- "You have learned how to create a new item: Red Linen Bag." -> "red linen bag"
 function ToLearn:LearnedFromMessage(msg)
-    if type(msg) ~= "string" then return nil end
+    if PC.IsSecret(msg) or type(msg) ~= "string" then return nil end -- (kept secret by the game at times: can't be read)
     for _, fmt in ipairs({ ERR_LEARN_RECIPE_S or "You have learned how to create a new item: %s.", ERR_LEARN_SPELL_S or "You have learned a new spell: %s.",
         ERR_LEARN_ABILITY_S or "You have learned a new ability: %s." }) do
         local pat = "^" .. fmt:gsub("%%s", "\001"):gsub("([%%%.%(%)%-%+%*%?%[%]%^%$])", "%%%1"):gsub("\001", "(.+)") .. "$"
@@ -1592,6 +1682,7 @@ function ToLearn:NoteLearned(name)
     if not name or name == "" then return end
     PC.cdb.learnedNames = PC.cdb.learnedNames or {}
     PC.cdb.learnedNames[self:Norm(name)] = true
+    self:ForgetRecipeItems()
     self:Changed()
     PC:RefreshUI()
 end
@@ -1602,6 +1693,7 @@ ev:SetScript("OnEvent", function(_, event, a1)
             -- something learned: the list and the trip are worked out again (tooltips say "Already known")
             ToLearn:Changed()
             ToLearn.riCache = nil
+            ToLearn:ForgetRecipeItems()
             -- a skill-up: anything new at the trainer? (a moment later, once the list has caught up)
             if event == "SKILL_LINES_CHANGED" then
                 C_Timer.After(3, function() if ToLearn.AUTO_TIPS then PC:Safe("trainer tip", ToLearn.CheckTrainer, ToLearn) end end)
@@ -1614,6 +1706,7 @@ ev:SetScript("OnEvent", function(_, event, a1)
             return
         end
         if event == "NEW_RECIPE_LEARNED" then
+            ToLearn:ForgetRecipeItems() -- (something was learned, whatever it's called)
             local info = C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo and C_TradeSkillUI.GetRecipeInfo(a1)
             local name = (info and info.name) or (GetSpellInfo and GetSpellInfo(a1))
             if name then ToLearn:NoteLearned(name) end

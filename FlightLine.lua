@@ -3,7 +3,8 @@
 --   from where you took off to where you land, and the time left counts down at its end.
 --   How long a flight takes: the time it took you last time (each route, each way, kept for every
 --   character), or the first time, worked out from the route's hops on the flight map.
---   When another add-on's flight timer is up (Forever++, InFlight...), this one stays hidden.
+--   When another add-on's flight timer is up (EllesmereUI's flight bar, Forever++, InFlight...), this one
+--   stays hidden for as long as that one shows. Settings > Travel and directions turns the line off.
 
 local ADDON, ns = ...
 local PC = ns.PC
@@ -19,7 +20,6 @@ Fly.DOT = 8                    -- the dots at each end
 Fly.ICON_SIZE = 42
 Fly.FONT_SIZE = 15             -- the time, centred under the line
 Fly.HEIGHT = 63
-Fly.OFF = true                 -- the line is put away for now (flights are still timed for other add-ons)
 Fly.TOO_SHORT = 5              -- seconds: shorter wasn't a flight worth timing
 Fly.WAIT = 10                  -- seconds to wait for a flight to start after taking it
 Fly.TAKEOFF = 4                -- seconds a flight spends getting up and down (for the first-time guess)
@@ -192,6 +192,20 @@ function Fly:Place()
     end
 end
 
+-- The line is wanted (Settings > Travel and directions; flights are timed either way)
+function Fly:On()
+    return not (PC.db and PC.db.flightLine == false)
+end
+
+-- EllesmereUI Forever Essentials' flight bar, when it's on (nil when it isn't there or is turned off)
+function Fly:EllesmereBar()
+    local E = _G.EllesmereUI
+    local el = type(E) == "table" and type(E._unlockRegisteredElements) == "table" and E._unlockRegisteredElements.EUI_FlightTimer
+    if type(el) ~= "table" or type(el.getFrame) ~= "function" then return nil end
+    local ok, f = pcall(el.getFrame) -- (nil while its flight timer is turned off)
+    return ok and type(f) == "table" and f.IsShown and f or nil
+end
+
 -- Another add-on's flight timer is up: ours stays out of the way (the flight is still timed)
 local function Loaded(name)
     local f = (C_AddOns and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
@@ -201,6 +215,18 @@ local function Loaded(name)
 end
 Fly.OTHERS = { "InFlight", "InFlight_Load", "FlightMap", "FlightHUD", "FlightTimer", "FlightTimes" }
 function Fly:OtherTimer()
+    -- EllesmereUI: only while its bar is really on screen (after a reload mid-flight it has none: ours shows)
+    local eb = self:EllesmereBar()
+    if eb and eb:IsShown() then return "EllesmereUI" end
+    -- the rest don't change during a flight: worked out once per flight
+    local fl = self.flight
+    if fl and fl.other ~= nil then return fl.other or nil end
+    local other = self:StaticTimer()
+    if fl then fl.other = other or false end
+    return other
+end
+
+function Fly:StaticTimer()
     -- Forever++: its Flight Timer module, with its bar on (both are on unless turned off in its settings)
     if Loaded("ForeverPlusPlus") then
         local db = type(ForeverPlusPlusDB) == "table" and ForeverPlusPlusDB
@@ -255,19 +281,22 @@ function Fly:Tick()
     if not fl.started then
         if onTaxi then
             fl.started = now
-            fl.quiet = (self.OFF and "off") or self:OtherTimer()
-            if not fl.quiet then
-                self:Place()
-                self:Frame().icon:SetTexture(self:Icon())
-                self:Frame():Show()
-            end
+            self:Frame().icon:SetTexture(self:Icon())
         elseif now - fl.asked > self.WAIT then
             self:Cancel() -- never took off
         end
         return
     end
     if not onTaxi then return self:Finish() end
-    if fl.quiet then return end -- another add-on's timer is showing this flight
+    -- turned off, or another add-on's timer is showing this flight: hidden (looked at every tick, so
+    -- the line steps aside the moment EllesmereUI's bar shows, and comes back if it goes)
+    fl.quiet = (not self:On() and "off") or self:OtherTimer()
+    local f = self:Frame()
+    if fl.quiet then
+        if f:IsShown() then f:Hide() end
+        return
+    end
+    if not f:IsShown() then self.placedAt = now; self:Place(); f:Show() end
     -- (the Task Button may have moved or been closed)
     if (self.placedAt or 0) + 1 < now then self.placedAt = now; self:Place() end
     self:Draw()

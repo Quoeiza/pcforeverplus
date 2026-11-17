@@ -88,6 +88,55 @@ local function Check(inst, panel, anchor, label, note, get, set)
     return spacer
 end
 
+-- A setting typed in as a whole number (kept between lo and hi), with a note under it like the switches
+local function NumberRow(inst, panel, anchor, label, note, get, set, lo, hi)
+    local row = CreateFrame("Frame", nil, panel)
+    row:SetSize(620, 22)
+    row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -6)
+    local eb = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+    eb:SetSize(40, 20)
+    eb:SetPoint("LEFT", 6, 0)
+    eb:SetAutoFocus(false)
+    eb:SetNumeric(true)
+    eb:SetMaxLetters(4)
+    eb:SetJustifyH("CENTER")
+    local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    text:SetPoint("LEFT", eb, "RIGHT", 8, 0)
+    text:SetText(label)
+    local function shown() local ok, v = pcall(get); return tostring(ok and v or "") end
+    local function apply()
+        local v = tonumber(eb:GetText())
+        if v then
+            v = math.max(lo, math.min(hi, math.floor(v)))
+            local okNow, cur = pcall(get)
+            if not (okNow and cur == v) then PC:Safe("setting: " .. label, set, v) end
+        end
+        eb:SetText(shown())
+        Options:RefreshAll()
+    end
+    eb:SetScript("OnEnterPressed", function(b) b:ClearFocus() end) -- (losing the focus applies it)
+    eb:SetScript("OnEditFocusLost", apply)
+    eb:SetScript("OnEscapePressed", function(b) b:SetText(shown()); b:ClearFocus() end)
+    eb:SetText(shown())
+    inst.checks[#inst.checks + 1] = {
+        get = get,
+        SetChecked = function(_, v) if not (eb.HasFocus and eb:HasFocus()) then eb:SetText(tostring(v or "")) end end,
+    }
+    local sub
+    if note then
+        sub = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        sub:SetPoint("TOPLEFT", text, "BOTTOMLEFT", 0, -2)
+        sub:SetWidth(560)
+        sub:SetJustifyH("LEFT")
+        sub:SetText(note)
+    end
+    local spacer = CreateFrame("Frame", nil, panel)
+    local noteH = sub and sub.GetStringHeight and sub:GetStringHeight() or 0
+    spacer:SetSize(1, note and math.max(14, (noteH or 0) + 6) or 1)
+    spacer:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, 0)
+    return spacer
+end
+
 local function Heading(panel, anchor, text, gap)
     local h = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     h:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(gap or 18))
@@ -276,23 +325,49 @@ function Options:BuildInto(root, withTitle)
 
     a = Heading(panel, a, "Auction House")
     a = Check(inst, panel, a, "Scan automatically when the Auction House opens",
-        "Checks prices for everything your recipes use. You can always click Scan AH yourself.",
+        "Checks prices for everything your recipes use. You can always click Scan auctions yourself.",
         function() return PC.db.autoScan ~= false end,
         function(v) PC.db.autoScan = v end)
     a = Check(inst, panel, a, "Open the window beside the Auction House",
         "Off: the Task Button does the work on its own; open the window with the minimap button or /pc when you want it.",
         function() return PC.db.openOnAH == true end,
         function(v) PC.db.openOnAH = v end)
-    a = Check(inst, panel, a, "Collect AH purchases and sale gold from the mail",
+    a = Check(inst, panel, a, "Buy in one click",
+        "Buy (or the Task Button) gets the Auction House's price and confirms it at once if it still pays. Off, or if the game won't allow it: the first click gets the price, the second buys.",
+        function() return PC.db.autoConfirm ~= false and not PC.db.confirmNeedsClick end,
+        function(v) PC.db.autoConfirm = v; if v then PC.db.confirmNeedsClick = nil end end)
+    a = Check(inst, panel, a, "Collect auction purchases and sale gold from the mail",
         "Only Auction House mail: everything else in your mailbox is left alone.",
         function() return PC.db.autoMail ~= false end,
         function(v) PC.db.autoMail = v end)
 
     a = Heading(panel, a, "Crafting and plans")
+    local function profitChanged()
+        if PC.UI then PC.UI.allEntries = nil end
+        PC:ForgetStopList()
+        PC:RefreshUI()
+    end
+    a = NumberRow(inst, panel, a, "Minimum profit (% of material cost)",
+        "Recipes below it are hidden (untick the profit boxes to see them), and buying stops before a craft drops below it. Default 10. Skill up and Gear upgrades plans ignore it.",
+        function() return PC:MinProfitPct() end,
+        function(v) PC.db.minProfitPct = v; profitChanged() end, 0, 1000)
+    a = Check(inst, panel, a, "Only recommend auction crafts that sold today",
+        "Best bets, Make me gold and Have materials skip auction crafts with no sales today. Vendor flips and disenchanting are unaffected.",
+        function() return PC.db.needSalesToday ~= false end,
+        function(v) PC.db.needSalesToday = v; profitChanged() end)
     a = Check(inst, panel, a, "Open the window beside my profession window",
         "Off: the Task Button crafts from the plan on its own; open the window when you want it.",
         function() return PC.db.dockProf == true end,
         function(v) PC.db.dockProf = v end)
+    a = Check(inst, panel, a, "Use what's in my bank",
+        "On: your bank counts towards plans and profits, and a bank trip collects what the plan needs. Off: the bank is ignored entirely. Nothing in it is counted, taken out or stored.",
+        function() return PC:UseBank() end,
+        function(v)
+            PC.db.useBank = v
+            PC:ForgetStopList()
+            if PC.UI then PC.UI.allEntries = nil end
+            PC:RefreshUI()
+        end)
     a = Check(inst, panel, a, "Make materials yourself when that's cheaper",
         "Bolts of cloth, bars, inks: when the plan needs one and making it costs less than buying it, the plan buys the raw materials and crafts it first.",
         function() return PC.cdb.vertical ~= false end,
@@ -308,11 +383,11 @@ function Options:BuildInto(root, withTitle)
 
     a = Heading(panel, a, "Vendors")
     a = Check(inst, panel, a, "Buy plan materials at vendors automatically",
-        "Only what's cheaper there than on the AH, and never over your spending limit.",
+        "Only what's cheaper there than at auction, and never over your spending limit.",
         function() return PC.db.autoVendorBuy ~= false end,
         function(v) PC.db.autoVendorBuy = v end)
     a = Check(inst, panel, a, "Sell junk at vendors",
-        "Grey items, sold the moment you talk to a merchant.",
+        "Grey items, sold the moment you talk to a merchant. Left to Scrap when it's installed.",
         function() return PC.db.autoJunk ~= false end,
         function(v) PC.db.autoJunk = v end)
     a = Check(inst, panel, a, "Sell leftover materials back to a vendor",
@@ -353,6 +428,14 @@ function Options:BuildInto(root, withTitle)
         "When you talk to a flight master and your route needs a flight, take it for you.",
         function() return PC.db.autoFly == true end,
         function(v) PC.db.autoFly = v end)
+    a = Check(inst, panel, a, "Show the flight line on flights",
+        "A gold line by the Task Button with the time left. Hidden while another flight timer is showing (EllesmereUI's flight bar, Forever++, Leatrix Plus, InFlight).",
+        function() return PC.db.flightLine ~= false end,
+        function(v)
+            PC.db.flightLine = v
+            local F = PC.FlightLine
+            if not v and F and F.frame then F.frame:Hide() end
+        end)
 
     a = Heading(panel, a, "Interface")
     a = Check(inst, panel, a, "Show the minimap button",
@@ -484,7 +567,7 @@ function Options:BuildInto(root, withTitle)
         { "/pc", "Show or hide the window" },
         { "/pc help", "List all chat commands available for this addon" },
         { "/pc status", "Check that everything is working" },
-        { "/pc scan", "Check AH prices for your recipes (the AH must be open)" },
+        { "/pc scan", "Check auction prices for your recipes (the Auction House must be open)" },
         { "/pc config", "Open settings" },
     }
     if PC.FOREVER then

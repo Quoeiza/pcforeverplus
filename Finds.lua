@@ -24,7 +24,26 @@ Finds.MAX_LEN = 240
 ---------------------------------------------------------------------------
 function Finds:Table()
     PC.db.recipeFinds = PC.db.recipeFinds or {}
-    return PC.db.recipeFinds
+    local t = PC.db.recipeFinds
+    -- finds heard before this check: ones named in another alphabet dropped, their places in this
+    -- client's language (once a session)
+    if not self.localised then
+        self.localised = true
+        for k, e in pairs(t) do
+            if PC.Foreign(e.name) or PC.Foreign(e.prof) then t[k] = nil
+            else for _, sp in ipairs(e.spots or {}) do self:LocaliseSpot(sp) end end
+        end
+    end
+    return t
+end
+
+-- A spot another player sent: the zone from its map, a name in another alphabet left out
+function Finds:LocaliseSpot(sp)
+    local z = sp.map and PC.Places and PC.Places.MapName and PC.Places.MapName(sp.map)
+    if z and (sp.zone == nil or PC.Foreign(sp.zone)) then sp.zone = z end
+    if PC.Foreign(sp.zone) then sp.zone = nil end
+    if PC.Foreign(sp.where) then sp.where = "" end
+    return sp
 end
 
 function Finds:Trainers()
@@ -210,6 +229,7 @@ function Finds:OnQuestComplete()
 end
 
 function Finds:OnLootMessage(msg)
+    if PC.IsSecret(msg) then return end -- (kept secret by the game at times: can't be read)
     local q = self.quest
     if not q or not msg or (GetTime() - q.t) > 15 then return end
     local fmt = LOOT_ITEM_PUSHED_SELF or "You receive item: %s."
@@ -279,6 +299,10 @@ function Finds:OnMessage(kind, faction, rest, who)
         local f = { prof = Nil(p[1]), name = Nil(p[2]), source = Nil(p[3]), where = p[4] or "", map = tonumber(p[5]), x = tonumber(p[6]),
             y = tonumber(p[7]), zone = Nil(p[8]), skill = tonumber(p[9]), level = tonumber(p[10]), cost = tonumber(p[11]),
             item = tonumber(p[12]), fac = faction }
+        -- from a client in another language: a recipe named in another alphabet can't be matched; its place
+        -- in this client's language
+        if PC.Foreign(f.name) or PC.Foreign(f.prof) then return end
+        self:LocaliseSpot(f)
         -- the other faction's quest or vendor isn't yours to use: keep it, it's shown as theirs
         if f.prof and f.name and f.source then self:Add(f, true, who) end
         return
@@ -290,7 +314,7 @@ function Finds:OnMessage(kind, faction, rest, who)
         T[prof] = T[prof] or {}
         for piece in (body .. "^"):gmatch("(.-)%^") do
             local name, skill, level, cost = piece:match("^([^~]*)~([^~]*)~([^~]*)~([^~]*)$")
-            if name and name ~= "" then
+            if name and name ~= "" and not PC.Foreign(name) then
                 local norm = PC.ToLearn and PC.ToLearn:Norm(name) or name:lower()
                 T[prof][norm] = { name = name, skill = tonumber(skill), level = tonumber(level), cost = tonumber(cost), trainer = key, heard = time() }
             end

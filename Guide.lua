@@ -65,8 +65,10 @@ function Guide:Changed()
     if not self:Active() then return end
     if PC.Pending and PC:Pending("ui") then return end -- the refresh on its way does it
     PC:Safe("guide", function()
-        if PC.Next then PC.Next:UpdateBar() end
-        if PC.Steps and PC.Steps.Refresh then PC.Steps:Refresh() end
+        PC:WithMemo(function()
+            if PC.Next then PC.Next:UpdateBar() end
+            if PC.Steps and PC.Steps.Refresh then PC.Steps:Refresh() end
+        end)
     end)
 end
 

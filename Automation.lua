@@ -25,6 +25,10 @@ PC.AutoOn = On
 -- Bags
 ---------------------------------------------------------------------------
 local function Bags()
+    -- inside a refresh every slot is read once (nothing moves in the middle of one; the plan's bag-room
+    -- maths asked for this list hundreds of times per refresh). Outside one it's always read fresh.
+    local memo = PC._memo
+    if memo and memo.bagSlots then return memo.bagSlots end
     local C = C_Container
     local numSlots = (C and C.GetContainerNumSlots) or GetContainerNumSlots
     local out = {}
@@ -42,6 +46,7 @@ local function Bags()
             if id then out[#out + 1] = { bag = bag, slot = slot, id = id, n = n or 1, quality = quality, noValue = noValue, locked = locked } end
         end
     end
+    if memo then memo.bagSlots = out end
     return out
 end
 PC.BagSlots = Bags
@@ -69,6 +74,261 @@ local function UseBagItem(bag, slot)
     if UseContainerItem then return UseContainerItem(bag, slot) end
 end
 PC.UseBagItem = UseBagItem
+
+---------------------------------------------------------------------------
+-- Selling to a vendor, to the exact amount: PC:SellExact({ {id, n}, ... }, onDone, quiet)
+-- Whole stacks that fit go first, smallest first (what you keep stays in as few stacks as possible;
+-- an exact fit needs no split). The rest is split off a bigger stack into an empty slot and sold once
+-- it's really there. One sale at a time, each checked: the stack leaves your bags and gold comes in.
+-- Never more than asked, never a locked stack or a recipe, nothing left on the cursor.
+-- onDone(res) once at the end: res = { sold = { {id, name, n, gold} }, short = { {id, name, want,
+-- got, why} }, n, gold, stopped = nil | "closed" | "nogold" | "busy" | "error" }.
+-- (Core's vendor-sale watch records each sale in Profit & loss: nothing is recorded here.)
+---------------------------------------------------------------------------
+PC.SELL_POLL = 0.1 -- seconds between checks
+PC.SELL_WAIT = 6   -- how long a sale or a split may take to land (lag)
+
+local function SlotInfo(bag, slot)
+    local C = C_Container
+    if C and C.GetContainerItemInfo then
+        local info = C.GetContainerItemInfo(bag, slot)
+        if info then return info.itemID, info.stackCount or 1, info.isLocked end
+        return nil
+    end
+    if GetContainerItemInfo then
+        local _, n, locked, _, _, _, _, _, _, id = GetContainerItemInfo(bag, slot)
+        if id then return id, n or 1, locked end
+    end
+end
+
+-- what's on the cursor: an item's id, true for anything else, nil when it's empty
+local function OnCursor()
+    if CursorHasItem and not CursorHasItem() then return nil end
+    if GetCursorInfo then
+        local kind, id = GetCursorInfo()
+        if kind == "item" then return id end
+        return kind and true or nil
+    end
+    return CursorHasItem and CursorHasItem() or nil
+end
+local function Clear() if ClearCursor then ClearCursor() end end
+
+-- this item's stacks a vendor will take (unlocked, worth something), how many in all, any locked
+local function Stacks(id)
+    local out, total, locked = {}, 0, false
+    for _, s in ipairs(Bags()) do
+        if s.id == id then
+            total = total + s.n
+            if s.locked then locked = true elseif not s.noValue then out[#out + 1] = s end
+        end
+    end
+    return out, total, locked
+end
+
+-- an empty slot in a bag that takes this item (nil when there's none)
+local function EmptySlot(id)
+    local numSlots = (C_Container and C_Container.GetContainerNumSlots) or GetContainerNumSlots
+    if not numSlots then return nil end
+    for _, bag in ipairs(PC:PlayerBags()) do
+        if PC:CanHold(bag, id) then
+            for slot = 1, numSlots(bag) or 0 do
+                if not SlotInfo(bag, slot) then return bag, slot end
+            end
+        end
+    end
+end
+
+-- The next stack to sell for exactly n: a whole stack that fits (smallest first, or one that makes an
+-- exact fit with the same number of stacks), else the smallest bigger one to split n off. -> stack, whole
+local function NextStack(stacks, n)
+    table.sort(stacks, function(a, b) return a.n < b.n end)
+    local pick, rest, sum = {}, {}, 0
+    for _, s in ipairs(stacks) do
+        if sum + s.n <= n then pick[#pick + 1] = s; sum = sum + s.n else rest[#rest + 1] = s end
+    end
+    for k = 1, (sum < n) and #pick or 0 do
+        for _, b in ipairs(rest) do
+            if sum - pick[k].n + b.n == n then return b, true end
+        end
+    end
+    if pick[1] then return pick[1], true end
+    return rest[1], false
+end
+PC.SellNextStack = NextStack
+
+function PC:SellExact(list, onDone, quiet)
+    local res = { sold = {}, short = {}, n = 0, gold = 0 }
+    if self.selling then
+        -- one sale at a time: a second list worked out now could sell what the first already sold
+        self.Buy:Say("Still selling to the vendor...")
+        res.stopped = "busy"
+        if onDone then onDone(res) end
+        return false
+    end
+    local jobs, byID = {}, {}
+    for _, it in ipairs(list or {}) do
+        local id, n = it.id or it[1], math.floor(tonumber(it.n or it[2]) or 0)
+        if id and n > 0 then
+            local j = byID[id]
+            if not j then j = { id = id, want = 0, got = 0, gold = 0 }; byID[id] = j; jobs[#jobs + 1] = j end
+            j.want = j.want + n
+            if self:NeverSell(id) then j.done, j.why = true, "recipes are never sold" end
+        end
+    end
+    local run = {}
+    self.selling = run
+    local i, step = 1, nil
+    local function finish(stopped)
+        if run.over then return end
+        run.over = true
+        if self.selling == run then self.selling = nil end
+        if run.cursor and OnCursor() then Clear() end
+        for _, j in ipairs(jobs) do
+            local name = self:ItemName(j.id) or ("item " .. j.id)
+            if j.got > 0 then
+                res.sold[#res.sold + 1] = { id = j.id, name = name, n = j.got, gold = j.gold }
+                res.n, res.gold = res.n + j.got, res.gold + j.gold
+            end
+            if j.got < j.want then
+                res.short[#res.short + 1] = { id = j.id, name = name, want = j.want, got = j.got,
+                    why = j.why or (stopped == "closed" and "the vendor window closed") or "selling stopped" }
+            end
+        end
+        res.stopped = stopped
+        if not quiet then
+            local t = self:SellSummary(res)
+            if t ~= "" then self.Buy:Say(t) end
+        end
+        if onDone then onDone(res) end
+        self:RefreshUI()
+    end
+    -- the next check, a moment from now (an error ends the run: never stuck "selling")
+    local function later(fn)
+        C_Timer.After(self.SELL_POLL, function()
+            if not run.over and not self:Safe("selling", fn) then finish("error") end
+        end)
+    end
+    -- check every SELL_POLL until cond() holds (then ok()) or SELL_WAIT runs out (then late())
+    local function waitFor(cond, ok, late)
+        local t0 = GetTime()
+        local function poll()
+            if cond() then return ok() end
+            if GetTime() - t0 >= self.SELL_WAIT then return late() end
+            later(poll)
+        end
+        later(poll)
+    end
+    local function stop(j, why) j.done, j.why = true, why; return step() end
+    -- sell the c of the item sitting at s, then wait until it has left your bags and the gold is in
+    local function sell(j, s, c)
+        local id, n, locked = SlotInfo(s.bag, s.slot)
+        if id ~= j.id or n ~= c or locked then return later(step) end -- it moved: work it out again
+        local _, before = Stacks(j.id)
+        local money, gain = GetMoney(), 0
+        UseBagItem(s.bag, s.slot)
+        local function gone()
+            local sid, sn = SlotInfo(s.bag, s.slot)
+            local _, now = Stacks(j.id)
+            return now <= before - c and not (sid == j.id and sn == c)
+        end
+        waitFor(function()
+            local m = GetMoney()
+            gain, money = gain + math.max(m - money, 0), m -- (what you buy meanwhile doesn't hide it)
+            return gain > 0 and gone()
+        end, function()
+            j.got, j.gold = j.got + c, j.gold + gain
+            self:PlanMadeUsed(j.id, c)
+            step()
+        end, function()
+            if not gone() then return stop(j, self.merchantOpen and "the vendor didn't take it" or "the vendor window closed") end
+            -- it left your bags but no gold came in: counted, and nothing more is sold
+            j.got = j.got + c
+            self:PlanMadeUsed(j.id, c)
+            j.why = "no gold came in for the last sale"
+            finish("nogold")
+        end)
+    end
+    -- split r off stack s into an empty slot, wait until exactly r sit there, then sell them
+    local function split(j, s, r)
+        local eb, es = EmptySlot(j.id)
+        if not eb then return stop(j, "no free bag slot to split a stack") end
+        local C = C_Container
+        local splitFn = (C and C.SplitContainerItem) or SplitContainerItem
+        local pick = (C and C.PickupContainerItem) or PickupContainerItem
+        if not (splitFn and pick) then return stop(j, "stacks can't be split here") end
+        local id, n, locked = SlotInfo(s.bag, s.slot)
+        if id ~= j.id or locked or (n or 0) <= r then return later(step) end
+        if OnCursor() then Clear() end
+        run.cursor = true
+        splitFn(s.bag, s.slot, r)
+        if OnCursor() ~= j.id then Clear(); run.cursor = nil; return stop(j, "the stack couldn't be split") end
+        pick(eb, es)
+        if OnCursor() then
+            -- that bag won't take it ("doesn't go in that container"): back it goes, that bag is skipped
+            Clear(); run.cursor = nil
+            self.refusedBag[eb .. ":" .. j.id] = true
+            j.refused = (j.refused or 0) + 1
+            if j.refused >= 3 then return stop(j, "no bag would take the split stack") end
+            return step()
+        end
+        run.cursor = nil
+        waitFor(function()
+            if not self.merchantOpen then return true end
+            local tid, tn, tl = SlotInfo(eb, es)
+            return tid == j.id and tn == r and not tl
+        end, function()
+            if not self.merchantOpen then return finish("closed") end
+            sell(j, { bag = eb, slot = es }, r)
+        end, function()
+            if OnCursor() == j.id then Clear() end
+            stop(j, "the split stack didn't arrive")
+        end)
+    end
+    step = function()
+        local j = jobs[i]
+        while j and (j.done or j.got >= j.want) do i = i + 1; j = jobs[i] end
+        if not j then return finish() end
+        if not self.merchantOpen then return finish("closed") end
+        local stacks, total, locked = Stacks(j.id)
+        if locked and not j.waited then
+            -- a stack of it is busy (being moved): give it a moment before working out what to sell
+            j.waited = true
+            return waitFor(function() local _, _, l = Stacks(j.id); return not l or not self.merchantOpen end, step, step)
+        end
+        if #stacks == 0 then
+            return stop(j, total > 0 and "locked, or a vendor won't buy it" or (j.got > 0 and "no more in your bags" or "not in your bags"))
+        end
+        local s, whole = NextStack(stacks, j.want - j.got)
+        if whole then return sell(j, s, s.n) end
+        return split(j, s, j.want - j.got)
+    end
+    if not self:Safe("selling", step) then finish("error") end
+    return true
+end
+
+-- One line for a finished vendor sale: what sold and the gold (with AH Profit and V Profit for
+-- crafted goods), then what didn't sell and why. "" when there's nothing to say.
+function PC:SellSummary(res, withProfit)
+    local parts, text = {}, ""
+    for _, s in ipairs(res.sold) do parts[#parts + 1] = s.n .. " " .. s.name end
+    if #parts > 0 then
+        text = ("Sold %s to the vendor for %s"):format(table.concat(parts, ", "), self:Money(res.gold))
+        if withProfit then
+            local ah, v
+            for _, s in ipairs(res.sold) do
+                local a, b = self.Sell:Profits(s.id, s.n, s.gold)
+                if a then ah = (ah or 0) + a end
+                if b then v = (v or 0) + b end
+            end
+            text = text .. " (" .. self.Sell:ProfitText(ah, v) .. ")"
+        end
+        text = "|cff40ff40" .. text .. ".|r"
+    end
+    for _, s in ipairs(res.short) do
+        text = text .. (text ~= "" and " " or "") .. ("|cffff8040%d %s not sold: %s.|r"):format(s.want - s.got, s.name, s.why)
+    end
+    return text
+end
 
 ---------------------------------------------------------------------------
 -- What you've posted on the AH, remembered until it sells or comes back (cdb.posted[itemID] = { n, t })
@@ -178,13 +438,36 @@ PC.Sell = Sell
 Sell.AH_CUT = 0.05
 Sell.UNDERCUT = 0 -- no undercutting: match the cheapest listing
 
--- The recipe entry that makes an item (for its cost), from the latest analysis
+-- The recipe entry that makes an item (for its cost), from the latest analysis (looked up by item,
+-- indexed once per analysis: this used to walk every recipe twice for every item you hold)
 function Sell:EntryFor(itemID)
     local entries = (PC.UI and PC.UI.allEntries) or {}
-    for _, e in ipairs(entries) do
-        if e.outID == itemID or e.r.output == itemID then return e end
-        for _, o in ipairs(e.r.outputs or {}) do if o == itemID then return e end end
+    if self._efList ~= entries then
+        local idx = {}
+        for _, e in ipairs(entries) do -- (the first recipe making it wins, as before)
+            if e.outID and not idx[e.outID] then idx[e.outID] = e end
+            if e.r.output and not idx[e.r.output] then idx[e.r.output] = e end
+            for _, o in ipairs(e.r.outputs or {}) do if not idx[o] then idx[o] = e end end
+        end
+        self._efList, self._efIdx = entries, idx
     end
+    return self._efIdx[itemID]
+end
+
+-- AH Profit and V Profit for n of an item (nil when a price or what it cost isn't known);
+-- vendGold: what the vendor really paid for them, when it's known
+function Sell:Profits(itemID, n, vendGold)
+    local cost = self:CostEach(itemID)
+    if not cost then return nil, nil end
+    local price = self:Price(itemID)
+    local vend = vendGold or (PC:SellPrice(itemID) or 0) * n
+    local ah = price and math.floor((price * (1 - self.AH_CUT) - cost) * n + 0.5) or nil
+    local v = vend > 0 and math.floor(vend - cost * n + 0.5) or nil
+    return ah, v
+end
+
+function Sell:ProfitText(ah, v)
+    return ("Auction Profit %s · Vendor Profit %s"):format(PC:Money(ah, true, true), PC:Money(v, true, true))
 end
 
 -- What one crafted item cost you in materials
@@ -206,7 +489,7 @@ function Sell:Price(itemID)
     local floorPrice
     local cost, known = self:CostEach(itemID)
     if cost then floorPrice = math.ceil(cost / (1 - self.AH_CUT)) end
-    if not cheapest then return nil, floorPrice, cost end
+    if not cheapest then return nil, floorPrice, cost, nil, known end
     -- match the cheapest listing: no undercutting
     local price = math.max(cheapest - self.UNDERCUT, 1)
     -- exact to the copper. Only Retail's AH refuses copper in a price (it wants whole silver): there,
@@ -216,7 +499,7 @@ function Sell:Price(itemID)
         if price < 100 then tooCheap = true end
         price = math.max(price - price % 100, 100)
     end
-    return price, floorPrice, cost, tooCheap
+    return price, floorPrice, cost, tooCheap, known
 end
 
 -- This AH only takes prices in whole silver: Retail's. WoW Forever and classic take copper.
@@ -391,6 +674,7 @@ end
 
 -- Items you unticked: the purge leaves them alone (they sell only at a profit, as usual)
 function Sell:PurgeSkip()
+    if self.noSkip then return {} end -- (PurgeCandidates: every one, ticked or not)
     PC.cdb.purgeSkip = PC.cdb.purgeSkip or {}
     return PC.cdb.purgeSkip
 end
@@ -402,12 +686,13 @@ function Sell:SetPurgeSkip(itemID, skip)
 end
 
 -- Every crafted item in your bags, ticked or not: { id, name, have, vendor, skipped }
+-- (the saved unticks are never swapped out to do this: an error halfway used to lose them)
 function Sell:PurgeCandidates()
-    local skip = self:PurgeSkip()
-    local saved = PC.cdb.purgeSkip
-    PC.cdb.purgeSkip = {}
-    local list = self:PurgeList()
-    PC.cdb.purgeSkip = saved
+    local skip, was = self:PurgeSkip(), self.purge
+    self.noSkip = true
+    local ok, list = pcall(self.PurgeList, self)
+    self.noSkip, self.purge = nil, was -- (PurgeList turns purge on for itself; an error there mustn't leave it on)
+    if not ok then error(list, 0) end
     for _, it in ipairs(list) do it.skipped = skip[it.id] and true or false end
     return list
 end
@@ -474,7 +759,7 @@ function PC:SoldNow()
 end
 
 function PC:NoteAuctionSold(name)
-    if type(name) ~= "string" or name == "" then return end
+    if type(name) ~= "string" or self.IsSecret(name) or name == "" then return end
     name = name:match("%[(.-)%]") or name
     local id = self:ItemIDByName(name)
     local each = id and self.cdb.postEach and self.cdb.postEach[id] or 1
@@ -488,6 +773,7 @@ end
 
 -- The gold for an announced sale reached the mailbox: it's in the ledger now (returns how many it counted)
 function PC:TakeSoldNow(name)
+    if self.IsSecret(name) then return end
     for i, e in ipairs(self:SoldNow()) do
         if e.name == name then table.remove(self.cdb.soldNow, i) return e.n or 1 end
     end
@@ -498,8 +784,9 @@ function PC:SoldSince(itemID, cut)
     local name = self:ItemName(itemID)
     if not name then return 0, false end
     local sold, fast = 0, false
-    for _, e in ipairs(self.cdb.ledger or {}) do
-        if e.kind == "sell" and e.item == name and e.t >= cut then sold = sold + (e.qty or 1) end
+    local s = self:SellIndex()[name] -- (your sales of this item only, not the whole ledger)
+    for _, e in ipairs(s and s.list or {}) do
+        if e[1] >= cut then sold = sold + (e[2] or 1) end
     end
     for _, e in ipairs(self:SoldNow()) do
         if e.name == name and e.t >= cut then sold = sold + (e.n or 1); fast = fast or e.fast == true end
@@ -542,12 +829,26 @@ function Sell:PostCap(itemID)
 end
 
 -- What you paid for one of an item lately (the last 7 days of purchases), or nil
+-- (purchases by item, indexed once per ledger change: the ledger holds up to 10,000 entries)
+local buyIdx, buyKey
 function Sell:PaidEach(itemID)
     local name = PC:ItemName(itemID)
     if not name then return nil end
+    local L = PC.cdb.ledger or {}
+    local last = L[#L]
+    local key = #L .. ":" .. tostring(L[1] and L[1].t) .. ":" .. tostring(last and last.t) .. ":" .. tostring(PC.ledgerVersion or 0)
+    if key ~= buyKey then
+        buyIdx, buyKey = {}, key
+        for _, e in ipairs(L) do
+            if e.kind == "buy" and e.item then
+                buyIdx[e.item] = buyIdx[e.item] or {}
+                table.insert(buyIdx[e.item], e)
+            end
+        end
+    end
     local cut, n, total = time() - 7 * 86400, 0, 0
-    for _, e in ipairs(PC.cdb.ledger or {}) do
-        if e.kind == "buy" and e.item == name and e.t >= cut then n = n + (e.qty or 1); total = total + e.amount end
+    for _, e in ipairs(buyIdx[name] or {}) do
+        if e.t >= cut then n = n + (e.qty or 1); total = total + e.amount end
     end
     if n == 0 then return nil end
     return total / n
@@ -599,39 +900,16 @@ function Sell:AskPurgeMats()
     })
 end
 
--- at an open vendor: sell the purge list, whole stacks one at a time
+-- at an open vendor: sell the purge list, exactly what's spare (a stack is split if it has to be)
 function Sell:SellMats()
     if not PC.merchantOpen then return 0 end
-    local want = {}
-    for _, it in ipairs(self:PurgeMatsList()) do want[it.id] = it.n end
-    local queue, value = {}, 0
-    for _, bs in ipairs(Bags()) do
-        local n = want[bs.id]
-        if n and n > 0 and not bs.locked and bs.n <= n then
-            queue[#queue + 1] = bs
-            want[bs.id] = n - bs.n
-            value = value + (PC:SellPrice(bs.id) or 0) * bs.n
-        end
-    end
-    local i = 0
-    local function nextOne()
-        i = i + 1
-        local bs = queue[i]
-        if not bs or not PC.merchantOpen then
-            if not bs then Sell.purgeMats = nil; PC:RefreshUI() end
-            return
-        end
-        UseBagItem(bs.bag, bs.slot)
-        PC:PlanMadeUsed(bs.id, bs.n)
-        C_Timer.After(0.2, nextOne)
-    end
-    if #queue > 0 then
-        PC.Buy:Say(("|cff40ff40Selling %d stack%s of spare materials for %s.|r"):format(#queue, #queue == 1 and "" or "s", PC:Money(value, false, true)))
-        nextOne()
-    else
-        Sell.purgeMats = nil
-    end
-    return #queue
+    local list, n = {}, 0
+    for _, it in ipairs(self:PurgeMatsList()) do list[#list + 1] = { id = it.id, n = it.n }; n = n + it.n end
+    if n == 0 then Sell.purgeMats = nil; PC:RefreshUI() return 0 end
+    local ok = PC:SellExact(list, function(res)
+        if not res.stopped then Sell.purgeMats = nil end -- done (stopped part way: the task stays)
+    end)
+    return ok and n or 0
 end
 
 function Sell:AskPurge()
@@ -639,7 +917,8 @@ function Sell:AskPurge()
     local list = self:PurgeList()
     local names, gold = {}, 0
     for _, it in ipairs(list) do
-        names[#names + 1] = it.sellN .. " " .. it.name
+        local ahP, vP = self:Profits(it.id, it.sellN)
+        names[#names + 1] = ("%d %s (%s)"):format(it.sellN, it.name, self:ProfitText(ahP, vP))
         local ah = it.price and it.price * (1 - self.AH_CUT) or 0
         gold = gold + math.max(ah, it.vendorPrice or 0) * it.sellN
     end
@@ -647,7 +926,7 @@ function Sell:AskPurge()
         title = "Purge crafted items?", sub = ("Clears bag space, about %s in all"):format(PC:Money(gold, false, true)),
         subColor = { 1, 0.82, 0 },
         sections = { { lines = names }, { lines = {
-            "Each sells wherever pays more (AH or vendor), even below what it cost.",
+            "Each sells wherever pays more (auction or vendor), even below what it cost.",
             "Untick any in the Plan tasks list to keep it.",
         }, bullets = false } },
         buttons = { { text = "Purge", onClick = function() Sell:SetPurge(true) end }, { text = "Cancel" } },
@@ -671,7 +950,10 @@ end
 -- worked out once per refresh and handed back to all of them)
 function Sell:Items()
     local memo = PC:Memo()
-    local key = "sellItems:" .. tostring(self.purge and true or false)
+    if not memo then return PC:WithMemo(self.Items, self) end -- (outside a refresh its parts still share their work)
+    -- (a purge with items unticked is worked out apart from one with every item: the purge list and
+    -- the tick list used to get whichever came first)
+    local key = "sellItems:" .. (not self.purge and "n" or next(self:PurgeSkip()) and "ps" or "p")
     if memo and memo[key] then return memo[key] end
     local out = PC:Timed("sellItems", self.ItemsRaw, self)
     if memo then memo[key] = out end
@@ -720,21 +1002,22 @@ function Sell:ItemsRaw()
     for id in pairs(self:Stock()) do if known[id] and not have[id] then have[id] = 0 end end
     local out = {}
     for id, n in pairs(have) do
-        local price, floorPrice, cost, tooCheap = self:Price(id)
+        local price, floorPrice, cost, tooCheap, costKnown = self:Price(id)
         local hold = price and floorPrice and price < floorPrice or false
         if tooCheap then hold = true end
         local profit, duration, deposit
         if price and n > 0 then
             local qty = PC:IsCommodity(id) and n or 1
-            duration, deposit = self:BestDuration(id, qty, price)
-            if PC.db.postDuration then duration = PC.db.postDuration; deposit = self:Deposit(id, duration, qty) or 0 end
+            if PC.db.postDuration then duration = PC.db.postDuration; deposit = self:Deposit(id, duration, qty) or 0
+            else duration, deposit = self:BestDuration(id, qty, price) end
         end
         if price and cost then profit = (price * (1 - self.AH_CUT) - cost) * n - (deposit or 0) end
         -- the vendor instead, when it pays more than the AH after its cut and deposit (or the AH can't
         -- beat what it cost) - and only when that's still a profit
         local vend = PC.SellPrice and PC:SellPrice(id) or 0
+        -- both ways, whichever it goes (AH Profit after the cut and deposit, V Profit), nil = not known
+        local ahProfit, vendorProfit = profit, (cost and vend > 0) and (vend - cost) * n or nil
         local vendor = false
-        local _, costKnown = self:CostEach(id)
         local via = PC.cdb.sellVia and PC.cdb.sellVia[id]
         if via == "Vendor" and vend > 0 and n > 0 and not (self.purge and not self:PurgeSkip()[id])
             and not (costKnown and cost and vend < cost) then
@@ -784,7 +1067,8 @@ function Sell:ItemsRaw()
         end
         if not skip then out[#out + 1] = { id = id, name = PC:ItemName(id) or ("Item " .. id), have = n, sellN = sellN, price = price, floor = floorPrice,
             cost = cost, profit = profit, hold = hold, stock = self:Stock()[id], duration = duration, deposit = deposit,
-            vendor = vendor, vendorPrice = vend, tooCheap = tooCheap and not vendor } end
+            vendor = vendor, vendorPrice = vend, tooCheap = tooCheap and not vendor,
+            ahProfit = ahProfit, vendorProfit = vendorProfit } end
     end
     table.sort(out, function(a, b)
         if (a.have > 0) ~= (b.have > 0) then return a.have > 0 end
@@ -857,21 +1141,21 @@ function Sell:OnAuctionError()
     if p.retail then
         if p.many then
             self.oneAtATime = true
-            return PC.Buy:Say("|cffff8040The AH refused posting them all at once. Click Post again: it'll post one at a time.|r")
+            return PC.Buy:Say("|cffff8040The Auction House refused posting them all at once. Click Post again: it'll post one at a time.|r")
         end
-        return PC.Buy:Say("|cffff5555The AH refused that post. Try posting one yourself from the AH's Sell tab and tell me what it says.|r")
+        return PC.Buy:Say("|cffff5555The Auction House refused that post. Try posting one yourself from the Auction House's Sell tab and tell me what it says.|r")
     end
     if p.retried then
-        return PC.Buy:Say("|cffff5555The Auction House refused the post. Try it once from the AH's Auctions tab; after that ProfitCrafter will know this client's rules.|r")
+        return PC.Buy:Say("|cffff5555The Auction House refused the post. Try it once from the Auction House's Auctions tab; after that ProfitCrafter will know this client's rules.|r")
     end
     -- the game only posts inside a click, so no automatic retry: switch format and let the next click try it
     local learned = PC.db.auctionLearned and next(PC.db.auctionLearned.byIndex or {})
     if not learned then
         local unit = (self:ClassicRunTime(1) == 1) and "minutes" or "index"
         PC.db.auctionRunTime = unit
-        PC.Buy:Say(("|cffff8040The AH refused that post. Click Post again: it'll try %s durations. If it still fails, post one item yourself from the AH and ProfitCrafter learns how.|r"):format(unit == "index" and "1/2/3" or "minute"))
+        PC.Buy:Say(("|cffff8040The Auction House refused that post. Click Post again: it'll try %s durations. If it still fails, post one item yourself from the Auction House and ProfitCrafter learns how.|r"):format(unit == "index" and "1/2/3" or "minute"))
     else
-        PC.Buy:Say("|cffff5555The AH refused that post. Post one item yourself from the AH's Sell tab so ProfitCrafter can learn this client's format.|r")
+        PC.Buy:Say("|cffff5555The Auction House refused that post. Post one item yourself from the Auction House's Sell tab so ProfitCrafter can learn this client's format.|r")
     end
     self.failedPost = (self.failedPost or 0) + 1
 end
@@ -916,12 +1200,18 @@ function Sell:Deposit(itemID, duration, qty)
         local ok, d = pcall(A.CalculateCommodityDeposit, itemID, duration, qty)
         if ok and d then return d end
     elseif A.CalculateItemDeposit and ItemLocation then
-        for _, s in ipairs(Bags()) do
-            if s.id == itemID then
-                local ok, d = pcall(A.CalculateItemDeposit, ItemLocation:CreateFromBagAndSlot(s.bag, s.slot), duration, 1)
-                if ok and d then return d end
-                break
-            end
+        -- (where each item sits is read once per refresh: this used to scan your bags three times an item)
+        local memo = PC:Memo()
+        local first = memo and memo.firstSlot
+        if not first then
+            first = {}
+            for _, s in ipairs(Bags()) do if not first[s.id] then first[s.id] = s end end
+            if memo then memo.firstSlot = first end
+        end
+        local s = first[itemID]
+        if s then
+            local ok, d = pcall(A.CalculateItemDeposit, ItemLocation:CreateFromBagAndSlot(s.bag, s.slot), duration, 1)
+            if ok and d then return d end
         end
     end
     return nil
@@ -985,12 +1275,14 @@ function Sell:Post(itemID)
     for _, x in ipairs(self:Items()) do if x.id == itemID then it = x end end
     if not it or it.sellN <= 0 then return end
     if not PC.ahOpen then return PC.Buy:Say("|cffff8040Open the Auction House to post.|r") end
-    if not self:Supported() then return PC.Buy:Say("|cffff5555This game version can't post from here: use the AH's Sell tab.|r") end
-    if not it.price then return PC.Buy:Say("|cffff8040No AH price for " .. it.name .. " yet: scan first.|r") end
-    if it.tooCheap then return PC.Buy:Say(("|cffff8040%s sells for under 1s on the AH: not worth posting. Holding it.|r"):format(it.name)) end
+    if not self:Supported() then return PC.Buy:Say("|cffff5555This game version can't post from here: use the Auction House's Sell tab.|r") end
+    if not it.price then return PC.Buy:Say("|cffff8040No auction price for " .. it.name .. " yet: scan first.|r") end
+    if it.tooCheap then return PC.Buy:Say(("|cffff8040%s sells for under 1s at auction: not worth posting. Holding it.|r"):format(it.name)) end
     if it.hold then return PC.Buy:Say(("|cffff8040%s would sell below what it cost you. Holding it.|r"):format(it.name)) end
-    local slot
-    for _, s in ipairs(Bags()) do if s.id == itemID and not s.locked then slot = s break end end
+    local slot, free = nil, 0
+    for _, s in ipairs(Bags()) do
+        if s.id == itemID and not s.locked then slot = slot or s; free = free + s.n end
+    end
     if not slot then return end
     if self:Classic() then return self:ClassicPost(it, slot) end
     local A = C_AuctionHouse
@@ -1008,6 +1300,8 @@ function Sell:Post(itemID)
     -- commodities: everything you have in one post; identical items (bags, shirts): all of them as
     -- separate auctions in one post, unless the AH refused that before (then one at a time)
     local qty = commodity and it.sellN or (self.oneAtATime and 1 or it.sellN)
+    -- never more than you have to hand: a locked stack is still on its way (the last post, a move)
+    qty = math.min(qty, free)
     local price = it.price
     if self:WholeSilver() then price = math.max(price - price % 100, 100) end -- Retail's AH: whole silver only
     local duration, deposit = self:BestDuration(itemID, qty, price)
@@ -1034,7 +1328,7 @@ end
 function Sell:ClassicPost(it, slot)
     local itemID = it.id
     if not self:ClassicPlace(slot) then
-        return PC.Buy:Say("|cffff5555Couldn't put " .. it.name .. " in the sell slot. Open the AH's Auctions tab and try again.|r")
+        return PC.Buy:Say("|cffff5555Couldn't put " .. it.name .. " in the sell slot. Open the Auction House's Auctions tab and try again.|r")
     end
     local stackSize = math.min(slot.n, it.sellN or slot.n) -- never into what you keep
     local duration, deposit = self:BestDuration(itemID, stackSize, it.price)
@@ -1060,49 +1354,14 @@ function Sell:ClassicPost(it, slot)
     PC:RefreshUI()
 end
 
--- One click: list everything sellable, one post at a time with a short gap so the server keeps up
--- (retail commodities go in one call per item; classic and gear go stack by stack)
-Sell.POST_GAP = 0.6
+-- One click, one post: the AH only takes a post during your click (the next click posts the next item)
 function Sell:PostAll()
     if not PC.ahOpen then return PC.Buy:Say("|cffff8040Open the Auction House to post.|r") end
-    do
-        -- the AH only takes a post during your click: one post per click
-        self.posting = false
-        for _, it in ipairs(self:Items()) do
-            if it.sellN > 0 and it.price and not it.hold and not it.vendor then return self:Post(it.id) end
-        end
-        return PC.Buy:Say("Nothing to post.")
-    end
-    if self.posting then return end
-    local queue = {}
+    self.posting = false
     for _, it in ipairs(self:Items()) do
-        if it.sellN > 0 and it.price and not it.hold then
-            if PC:IsCommodity(it.id) and not self:Classic() then
-                queue[#queue + 1] = it.id
-            else
-                for _, bs in ipairs(Bags()) do if bs.id == it.id and not bs.locked then queue[#queue + 1] = it.id end end
-            end
-        end
+        if it.sellN > 0 and it.price and not it.hold and not it.vendor then return self:Post(it.id) end
     end
-    if #queue == 0 then return PC.Buy:Say("Nothing to post.") end
-    self.posting = true
-    local i, done = 0, 0
-    local function step()
-        i = i + 1
-        local id = queue[i]
-        if not id or not PC.ahOpen then
-            self.posting = false
-            PC.Buy:Say(("|cff40ff40Posted %d listing%s.|r"):format(done, done == 1 and "" or "s"))
-            PC:RefreshUI()
-            return
-        end
-        local before = Posted:Count(id)
-        self:Post(id)
-        if Posted:Count(id) > before then done = done + 1 end
-        C_Timer.After(self.POST_GAP, function() Safe("posting", step) end)
-    end
-    step()
-    PC:RefreshUI()
+    return PC.Buy:Say("Nothing to post.")
 end
 
 -- Keep-in-stock targets: [itemID] = how many you want on hand (per character)
@@ -1236,12 +1495,44 @@ function Craft:Count(e)
         -- what lands in your bags is what's crafted: the green, not the dust it's disenchanted into
         local outID = (e.disenchant and e.r.output) or e.outID or e.r.output
         if outID then
-            local fit = math.floor(PC:FitsQty(outID, n * per) / per)
+            local fit = self:FitCrafts(e, outID, per, n)
             if fit < n then n = math.max(fit, 0) end
             if n == 0 then self.noRoom = e.r.name end -- crafting waits for bag room
         end
     end
     return n
+end
+
+-- How many crafts' output fits as you go (up to n): each craft uses its materials, and a stack of them
+-- that runs out frees its slot for what's made (1 clam + 1 spice make 1 dish: one free slot to start
+-- is enough for the lot). Only stacks in bags that can hold what's made count as freed (a reagent bag
+-- can't take a cooked dish), those elsewhere assumed to run out first; the craft's own materials only
+-- free their slot once the craft after it starts.
+function Craft:FitCrafts(e, outID, per, n)
+    local size = math.max(PC:StackSize(outID), 1)
+    local free = PC:FreeSlotsFor(outID)
+    local room, mats = 0, {}
+    for _, rg in ipairs(e.r.reagents or {}) do
+        local id = PC:ReagentFor(rg, e.mats)
+        if id and id ~= outID and not mats[id] then
+            mats[id] = { n = 0, size = math.max(PC:StackSize(id), 1), away = 0 }
+        end
+        if id and mats[id] then mats[id].n = mats[id].n + rg.n end
+    end
+    for _, sl in ipairs(PC.BagSlots and PC:BagSlots() or {}) do
+        if sl.id == outID and size > 1 then room = room + math.max(size - (sl.n or 1), 0) end
+        local m = mats[sl.id]
+        if m and not PC:CanHold(sl.bag, outID) then m.away = m.away + 1 end
+    end
+    local best = 0
+    for k = 1, n do
+        local need = math.max(math.ceil((k * per - room) / size), 0)
+        local freed = 0
+        for _, m in pairs(mats) do freed = freed + math.max(math.floor((k - 1) * m.n / m.size) - m.away, 0) end
+        if need - freed > free then break end
+        best = k
+    end
+    return best
 end
 
 -- How many of a recipe the market will let you craft now (the same rule as Count, without the bag
@@ -1373,7 +1664,7 @@ function Craft:ToolStep(e, name, id, s)
         return s
     end
     s.text = ("Buy a %s at a vendor"):format(name)
-    s.tip = s.tip .. " Try a Trade Supplies or General Goods vendor (tools aren't bought on the AH)."
+    s.tip = s.tip .. " Try a Trade Supplies or General Goods vendor (tools aren't bought at auction)."
     return s
 end
 
@@ -1399,7 +1690,7 @@ function Craft:Station(e)
     if not e then return nil end
     local name, near, sure
     if not T then name = self:StationRemembered(e.id) end
-    if T.GetRecipeRequirements then
+    if T and T.GetRecipeRequirements then
         local ok, reqs = pcall(T.GetRecipeRequirements, e.id)
         if ok and type(reqs) == "table" then
             for _, r in ipairs(reqs) do
@@ -1414,7 +1705,7 @@ function Craft:Station(e)
             end
         end
     end
-    if not name and T.GetRecipeInfo then
+    if not name and T and T.GetRecipeInfo then
         local ok, info = pcall(T.GetRecipeInfo, e.id)
         local tools = ok and info and (info.requiredTool or info.tools)
         if type(tools) == "string" and tools ~= "" then
@@ -1636,6 +1927,7 @@ local function Loaded(name)
     local ok, v = pcall(loaded, name)
     return ok and v and true or false
 end
+PC.AddOnLoaded = Loaded
 
 -- Which auction addon helps with undercut scans: Auctionator, else TradeSkillMaster, else none
 function Undercut:Helper()
@@ -1658,6 +1950,7 @@ end
 function Undercut:Mine()
     local out = {}
     local A = C_AuctionHouse
+    if not (A and A.GetNumOwnedAuctions) then return out end
     local ok, num = pcall(A.GetNumOwnedAuctions)
     if not ok or not num then return out end
     for i = 1, num do

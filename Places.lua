@@ -20,12 +20,25 @@ Places.MAX_STOCK = 60     -- items remembered per vendor
 ---------------------------------------------------------------------------
 -- Storage: db.places[faction][key] = { kind, name, map, x, y, zone, seen, mine, confirmed, stock = {id=true} }
 ---------------------------------------------------------------------------
+-- Every change to the places counts one more (lists made from them are kept until the count moves on)
+Places.rev = 0
+function Places:Dirty()
+    self.allPlaces = nil
+    self.rev = self.rev + 1
+end
+
 function Places:Table()
     local db = PC.db
     db.places = db.places or {}
     local f = PC:Faction()
     db.places[f] = db.places[f] or {}
-    return db.places[f]
+    local t = db.places[f]
+    -- places heard before this check came in: put into this client's language once a session
+    if not self.localised then
+        self.localised = true
+        for _, p in pairs(t) do if not p.mine then self:Localise(p) end end
+    end
+    return t
 end
 
 local function Key(kind, map, x, y, name)
@@ -91,18 +104,36 @@ function Places:Learn(kind, name, stock, extra)
         end
     end
     t[key] = p
-    self.allPlaces = nil
+    self:Dirty()
     if PC.Share and PC.Share.SharePlace then PC.Share:SharePlace(key, p) end
     return p
 end
 
 -- A place someone else told us about
+-- A place another player sent, in this client's language: the zone from its map, and a name or
+-- sub-zone in another alphabet (their client's language) swapped for the NPC's name here, or the kind
+-- of place ("Vendor", "Innkeeper")
+function Places:Localise(p)
+    if type(p) ~= "table" then return p end
+    local z = p.map and self.MapName(p.map)
+    if z and (p.zone == nil or PC.Foreign(p.zone)) then p.zone = z end
+    if PC.Foreign(p.zone) then p.zone = nil end
+    if PC.Foreign(p.name) then
+        local n = p.id and PC.ToLearn and PC.ToLearn.NPCName and PC.ToLearn:NPCName(tonumber(p.id))
+        p.name = (n and not PC.Foreign(n)) and n or self.KINDS[p.kind] or nil
+    end
+    if PC.Foreign(p.sub) then p.sub = nil end
+    if PC.Foreign(p.tozone) then p.tozone = p.tomap and self.MapName(p.tomap) or nil end
+    return p
+end
+
 function Places:Heard(key, p)
     -- a crossing someone made in a moment was their hearthstone, a summon or the graveyard, not a
     -- ride anyone can take: don't keep it
     if p and p.kind == "link" and (p.secs or 0) <= 30 then return end
     local t = self:Table()
-    self.allPlaces = nil
+    self:Dirty()
+    self:Localise(p)
     local have = t[key]
     if have and have.mine then return end -- our own visits always win
     if have then
@@ -149,6 +180,16 @@ local function MyLetter()
     return (f == "Horde" and "H") or (f == "Alliance" and "A") or "N"
 end
 
+-- Every place Mostly Not Broken learns or hears counts one more (MNB:Listen), so what's worked out from
+-- them (zone crossings, the Ruins entrance) is kept until they change instead of read again each time
+Places.mnbRev = 0
+do
+    local m = _G.MostlyNotBroken
+    if type(m) == "table" and type(m.Listen) == "function" then
+        Places.mnbListening = pcall(m.Listen, m, "ProfitCrafterPlaces", function() Places.mnbRev = Places.mnbRev + 1 end) and true or nil
+    end
+end
+
 -- calls fn(key, place) for each MostlyNotBroken place of a kind (guarded)
 function Places:MNBEach(kind, fn)
     local m = self:MNB()
@@ -173,8 +214,10 @@ function Places:Borrowed()
                 if pl.f ~= my and pl.f ~= "N" then return end
                 local name = type(pl.n) == "string" and pl.n ~= "" and pl.n or self.KINDS[kind]
                 local p = { kind = kind, name = name, map = m, x = x, y = y, zone = MapName(m) or "",
-                    mine = false, confirmed = false, mnb = true, heard = 0 }
+                    mine = false, confirmed = false, mnb = true, heard = 0, id = tonumber(pl.id) }
                 if type(pl.sz) == "string" and pl.sz ~= "" then p.sub = pl.sz end
+                self:Localise(p) -- (sent by players on other clients: their language)
+                name = p.name
                 if kind == "vendor" and type(pl.st) == "table" then
                     p.stock = {}
                     for id, v in pairs(pl.st) do if v and tonumber(id) then p.stock[tonumber(id)] = true end end
@@ -184,7 +227,7 @@ function Places:Borrowed()
         end
     end
     self.borrowed = { t = now, list = list }
-    self.allPlaces = nil
+    self:Dirty()
     return list
 end
 
@@ -249,13 +292,35 @@ local function Dist(map, x, y, p)
     return math.sqrt(dx * dx + dy * dy)
 end
 
+-- Every place of one kind, in the same order a look through All() finds them (kept until the places change:
+-- looking for the nearest anything used to go through every place there is, a thousand and more, each time)
+local NONE = {}
+function Places:OfKind(kind)
+    local all = self:All()
+    local c = self.kindIndex
+    if not c or c.all ~= all or c.rev ~= self.rev then
+        c = { all = all, rev = self.rev, by = {} }
+        for _, p in pairs(all) do
+            local k = p.kind
+            if k ~= nil then
+                local l = c.by[k]
+                if not l then l = {}; c.by[k] = l end
+                l[#l + 1] = p
+            end
+        end
+        self.kindIndex = c
+    end
+    return c.by[kind] or NONE
+end
+
 -- Nearest place of `kind`; for vendors, one that sells `itemID` (nil = any). Falls back to another zone.
 function Places:Nearest(kind, itemID, name, test)
     local map, x, y = self:Here()
     local best, bestD, other
     local stars = map and self:StarMesh(map) -- in a city, how far it really is to walk there
-    for _, p in pairs(self:All()) do
-        if p.kind == kind and (not itemID or (p.stock and p.stock[itemID])) and (not name or (p.name or ""):lower() == name:lower())
+    local lname = name and name:lower()
+    for _, p in ipairs(self:OfKind(kind)) do
+        if (not itemID or (p.stock and p.stock[itemID])) and (not lname or (p.name or ""):lower() == lname)
             and (not test or test(p)) then
             local d = map and ((stars and self:StarDist(map, p)) or Dist(map, x, y, p))
             if d then
@@ -582,9 +647,11 @@ function Places:Exits()
 end
 
 -- you walked from `a` (one map) into `b` (the next): remember where the border is
+Places.exitsRev = 0
 function Places:NoteCrossing(a, b)
     if not a or not b or not a.map or not b.map or a.map == b.map then return end
     if not PC:RouteOn() then return end
+    self.exitsRev = self.exitsRev + 1 -- (a crossing walked again moves the one saved: the travel map is made again)
     -- Tirisfal into Undercity's map at ground level: that's the Ruins of Lordaeron's entrance (not a road);
     -- Mulgore and Thunder Bluff only meet at the elevators
     local T = PC.Travel
@@ -643,7 +710,10 @@ function Places:AllExits()
     local now = GetTime and GetTime() or 0
     local learned = self:Exits()
     local c = self.allExits
-    if c and now - c.t < 10 then return c.list end
+    -- kept until a crossing is learned here or heard from Snuggle Up's data (then made again straight away);
+    -- while the game's map list is still loading, looked at again every 10 seconds
+    if c and c.learned == learned and c.mnbRev == self.mnbRev and (c.complete or now - c.t < 10) then return c.list end
+    local complete = self.mnbListening and true or false
     local all = {}
     -- (never between a city and the zone round it: Tirisfal/Undercity, Mulgore/Thunder Bluff)
     local T = PC.Travel
@@ -674,10 +744,14 @@ function Places:AllExits()
             if m1 and m2 and not cityPair(m1, m2) then
                 add(m1, t[2], t[3], m2, t[5], t[6], t[4])
                 add(m2, t[5], t[6], m1, t[2], t[3], t[1])
+            elseif not (m1 and m2) then
+                complete = false
             end
         end
+    else
+        complete = false
     end
-    self.allExits = { t = now, list = all }
+    self.allExits = { t = now, list = all, learned = learned, mnbRev = self.mnbRev, complete = complete }
     return all
 end
 
@@ -811,17 +885,18 @@ function Places:BearingFor(t)
     return self.bearingKey == key and self.curBearing or nil
 end
 
-function Places:TickScreenArrow(p, map, x, y)
+-- (aimed: this tick's aim and offset from TickArrow, so they aren't worked out again)
+function Places:TickScreenArrow(p, map, x, y, aimed, t, label, final, yards, ex, sy)
     local f = self:ScreenArrow()
     if not f then return end
     -- off in settings, or TomTom is showing the way (its own arrow): ours stays out of it
     if not p or not map or not PC:RouteOn() or self.tomtom
         or self:Talking() then f:Hide() return end
-    local t, label, final = self:Aim(p, map, x, y)
+    if not aimed then t, label, final = self:Aim(p, map, x, y) end
     if not t then f:Hide() return end
     -- which way you face can be kept secret (in combat): no arrow until it's known again
     if GetPlayerFacing and PC.IsSecret(GetPlayerFacing()) then f:Hide() return end
-    local yards, ex, sy = self:OffsetAny(t, map, x, y)
+    if not aimed then yards, ex, sy = self:OffsetAny(t, map, x, y) end
     if not yards then f:Hide() return end
     if not final and yards <= 3 then
         -- at the zone exit: keep going the same way, into the next zone
@@ -952,22 +1027,23 @@ function Places:TickArrow()
     if map then self.lastSpot = { map = map, x = x, y = y, t = now } end
     -- one direction for both arrows this tick (walked ground, turned smoothly)
     self.curBearing = nil
+    local t0, label0, final0, yd, e0, s0
     if map then
-        local t0 = self:Aim(p, map, x, y)
-        local yd, e0, s0
+        t0, label0, final0 = self:Aim(p, map, x, y)
         if t0 then yd, e0, s0 = self:OffsetAny(t0, map, x, y) end
         if yd and (e0 ~= 0 or s0 ~= 0) then self.curBearing = self:Bearing(t0, map, x, y, yd, e0, s0) end
     end
-    self:TickScreenArrow(p, map, x, y)
+    -- (one aim for both arrows this tick)
+    self:TickScreenArrow(p, map, x, y, map ~= nil, t0, label0, final0, yd, e0, s0)
     if not a or not Minimap then return end
     if not map then a:Hide() return end
-    local t, _, final = self:Aim(p, map, x, y)
+    local t, final = t0, final0
     if not t then a:Hide() return end
     if t.map == map then
         local dx, dy = t.x - x, t.y - y
         self.lastDist = math.sqrt(dx * dx + dy * dy) * 100 -- map units
     end
-    local yards, ex, sy = self:OffsetAny(t, map, x, y)
+    local yards, ex, sy = yd, e0, s0
     if not yards then a:Hide() return end
     self.lastYards = yards
     if final and yards < self.ARRIVE then a:Hide() return end
@@ -1089,10 +1165,14 @@ function Places:NoteRole(kind)
 end
 
 local ev = CreateFrame("Frame")
-for _, e in ipairs({ "MERCHANT_SHOW", "AUCTION_HOUSE_SHOW", "MAIL_SHOW", "TAXIMAP_OPENED", "BANKFRAME_OPENED" }) do pcall(ev.RegisterEvent, ev, e) end
+for _, e in ipairs({ "MERCHANT_SHOW", "AUCTION_HOUSE_SHOW", "MAIL_SHOW", "TAXIMAP_OPENED", "BANKFRAME_OPENED", "PLAYER_LOGIN" }) do pcall(ev.RegisterEvent, ev, e) end
 ev:SetScript("OnEvent", function(_, event)
     PC:Safe("places", function()
-        if event == "MERCHANT_SHOW" then
+        if event == "PLAYER_LOGIN" then
+            -- every add-on's saved Mostly Not Broken places have joined the shared ones by now (they join
+            -- without being told about one by one): what was worked out from them is made again
+            Places.mnbRev = Places.mnbRev + 1
+        elseif event == "MERCHANT_SHOW" then
             Places:Learn("vendor", UnitName and UnitName("npc") or "Vendor", MerchantStock())
         elseif event == "AUCTION_HOUSE_SHOW" then
             Places:Learn("ah", "Auction House")

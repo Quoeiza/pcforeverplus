@@ -263,6 +263,15 @@ function Steps:Undo()
     elseif u.kind == "sellskip" then
         PC.cdb.sellSkipUntil = nil
         say = "Selling is back."
+    elseif u.kind == "amend" then
+        -- a plan cut back when buying stopped at the minimum profit: the counts it had come back
+        local plan, names = PC:CurrentPlan(), {}
+        for id, n in pairs(u.counts or {}) do
+            plan[id] = n
+            names[#names + 1] = ("%s %d"):format((PC.cdb.recipes[id] or {}).name or "?", n)
+        end
+        PC:ForgetStopList()
+        say = "Plan restored: " .. table.concat(names, ", ") .. "."
     end
     if PC.UI then PC.UI.allEntries = nil end
     if say then PC.Buy:Say(say) end
@@ -277,6 +286,18 @@ end
 -- Travel lines for getting to a place: a flight first when it's in another zone
 local function TravelTo(out, kind, place, label)
     local P = PC.Places
+    -- already there: from where you stand (talking to them, their window open, or a few yards off), or
+    -- later in the list, a few yards from the stop before. Nothing to travel then.
+    if place and PC.Travel then
+        local T = PC.Travel
+        if Steps.firstTrip then
+            if T:AtPlace(place) then return end
+        else
+            local yd = Steps.lastPlace and T:Yards(Steps.lastPlace, place)
+            if yd and yd <= T.AT_YARDS then Steps.lastPlace = place return end
+        end
+        Steps.lastPlace = place
+    end
     if not place then
         out[#out + 1] = { cat = "Travel", text = ("find %s"):format(label) }
         return
@@ -331,8 +352,8 @@ function Steps:Simple(st)
         if t:find("^buy ") then return Cap(t) .. " at vendor" end
         return Cap(t)
     elseif cat == "AH" then
-        if t:find("^buy ") or t:find("^post ") then return Cap(t) .. " on AH" end
-        if t:find("^check undercuts") then return "Check your auctions on AH" end
+        if t:find("^buy ") or t:find("^post ") then return Cap(t) .. " at auction" end
+        if t:find("^check undercuts") then return "Check your auctions" end
         return Cap(t)
     elseif cat == "Bank" then
         if t:find("^take out ") then return Cap(t) .. " of the bank" end
@@ -354,6 +375,7 @@ function Steps:Build()
     -- on a flight: no ways worked out from up here (that's when it suggested a hearthstone mid-air)
     local flying = PC.Travel and PC.Travel.FlightText and PC.Travel:FlightText()
     self.firstTrip = not flying
+    self.lastPlace = nil
     local UI, P = PC.UI, PC.Places
     if not UI or not PC.cdb then return out end
     if not UI.allEntries then UI.allEntries = PC:Analyze() end
@@ -366,6 +388,8 @@ function Steps:Build()
     mark("l_buyentries")
     mark("l_shop")
     local ahList, vendorList = UI:PlanBuyList(list), UI:PlanVendorList(list)
+    -- only what keeps its craft at the minimum profit (the same as the Task Button)
+    if PC.Buy and PC.Buy.ProfitList then ahList, vendorList = PC.Buy:ProfitList(ahList), PC.Buy:ProfitList(vendorList, true) end
     mark("lists")
     local at = nil -- where you'll be standing: no travel line between steps at the same place
     local function nearest(kind)
@@ -451,7 +475,7 @@ function Steps:Build()
             at = kind
         end
         if kind == "mail" then
-            out[#out + 1] = { cat = "Mail", text = mailN > 0 and ("collect %d AH purchase%s"):format(mailN, mailN == 1 and "" or "s") or "check the mailbox", rm = { kind = "mail" } }
+            out[#out + 1] = { cat = "Mail", text = mailN > 0 and ("collect %d auction purchase%s"):format(mailN, mailN == 1 and "" or "s") or "check the mailbox", rm = { kind = "mail" } }
         elseif kind == "bank" then
             if #take > 0 then
                 local n = {}
@@ -488,7 +512,7 @@ function Steps:Build()
             TravelTo(out, "station", p, "a " .. station)
             at, lastStation = "station", station
         end
-        out[#out + 1] = { cat = "Craft", text = ("%d %s"):format(e.planCount or 0, e.r.name), recipeID = (not e.sub) and e.id or nil, sub = e.sub,
+        out[#out + 1] = { cat = "Craft", text = PC:CraftCount(e.planCount or 0, e.r), recipeID = (not e.sub) and e.id or nil, sub = e.sub,
             rm = e.sub and { kind = "make", id = e.outID } or { kind = "craft", id = e.id } }
         -- made for its dust: disenchant them right after, before what needs the dust
         if e.disenchant then
@@ -502,7 +526,7 @@ function Steps:Build()
     local planHasCrafts = next(PC:CurrentPlan() or {}) ~= nil
     for id, n in pairs(planHasCrafts and self:Skipped() or {}) do
         local r = PC.cdb.recipes[id]
-        if r then out[#out + 1] = { cat = "Craft", text = ("%d %s"):format(n, r.name), recipeID = id, skipped = true } end
+        if r then out[#out + 1] = { cat = "Craft", text = PC:CraftCount(n, r), recipeID = id, skipped = true } end
     end
 
     -- 3b) greens made for their dust: disenchant them
@@ -1042,7 +1066,10 @@ function Steps:PaintNow()
         f.title:SetText((run and "Recipe Run" or "Plan tasks") .. count
             .. ((skill and not run) and "  |cffff8040(skill-up: not for profit)|r" or ""))
     end
-    local s = (PC.Next and PC.Next.Compute) and PC.Next:Compute() or {}
+    -- outside a refresh (rolling out, dragging the tab, the mouse wheel): the step the button shows, not
+    -- the whole next step worked out again for every row the list moves
+    local N = PC.Next
+    local s = (not PC:Memo() and N and N.shown) or ((N and N.Compute) and N:Compute()) or {}
     local cat = self:CatOf(s)
     local text = self:NowText(s)
     f.nowBar.text:SetText(Tag(cat) .. " - " .. text)

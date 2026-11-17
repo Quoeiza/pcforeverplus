@@ -286,8 +286,9 @@ end
 function Roads:Aim(c, wx, wy, tx, ty)
     local cache = self.cache
     local now = GetTime and GetTime() or 0
+    -- (standing still, the way is the same however old it is: worked out again only once you move)
     if not (cache and cache.c == c and cache.tx == tx and cache.ty == ty
-        and Dist(cache.wx, cache.wy, wx, wy) < self.CACHE_YD and now - cache.t < 0.5) then
+        and Dist(cache.wx, cache.wy, wx, wy) < self.CACHE_YD and (now - cache.t < 0.5 or (cache.wx == wx and cache.wy == wy))) then
         local way, onDist = self:Way(c, wx, wy, tx, ty)
         cache = { c = c, wx = wx, wy = wy, tx = tx, ty = ty, t = now, way = way, on = onDist }
         self.cache = cache

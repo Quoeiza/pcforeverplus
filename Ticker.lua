@@ -110,9 +110,9 @@ function Strip:Button(i)
         if not it then return end
         local tip = { it.name, ("Now %s, usually %s (%s%d%%)"):format(PC:Money(it.price), PC:Money(it.usual or 0),
             it.pct >= 0 and "+" or "-", math.floor(math.abs(it.pct) + 0.5)),
-            ("%d listed on the AH"):format(it.listed or 0) }
+            ("%d listed at auction"):format(it.listed or 0) }
         if it.sold then tip[#tip + 1] = ("About %d sold in the last day"):format(it.sold) end
-        tip[#tip + 1] = "|cff888888Click: price graph   Shift-click: search the AH|r"
+        tip[#tip + 1] = "|cff888888Click: price graph   Shift-click: search the Auction House|r"
         if PC.UI and PC.UI.ShowTooltip then PC.UI.ShowTooltip(btn, tip, it.id) end
     end)
     b:SetScript("OnLeave", function()

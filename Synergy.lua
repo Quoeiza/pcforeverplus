@@ -39,11 +39,17 @@ for _, row in ipairs(Synergy.DE_TABLE) do
     for _, part in ipairs({ row[3], row[4] }) do for _, m in ipairs(part) do Synergy.DE_MATS[m[1]] = true end end
 end
 
+-- An item's quality, level, class and slot never change: asked of the game once per item (every recipe's
+-- profit asks whether its item can be disenchanted, and the cheapest way to dust asks it for every recipe)
+local infoCache = {}
 local function Info(itemID)
     local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
     if not getInfo or not itemID then return nil end
+    local c = infoCache[itemID]
+    if c then return c[1], c[2], c[3], c[4] end
     local name, _, quality, ilvl, _, _, _, _, equipLoc, _, _, classID = getInfo(itemID)
-    if not name then return nil end
+    if not name then return nil end -- (not loaded yet: asked again next time)
+    infoCache[itemID] = { quality, ilvl, classID, equipLoc }
     return quality, ilvl, classID, equipLoc
 end
 
@@ -490,6 +496,8 @@ for _, e in ipairs({ "UNIT_SPELLCAST_SUCCEEDED", "UNIT_SPELLCAST_FAILED", "UI_ER
 ev:SetScript("OnEvent", function(_, event, unit, a2, spellID)
     local recent = Synergy.clickedAt and GetTime() - Synergy.clickedAt < 3
     if event == "UI_ERROR_MESSAGE" then
+        -- the game keeps its messages secret at times: one that can't be read is left alone
+        if PC.IsSecret(a2) or PC.IsSecret(unit) then return end
         if recent then
             local msg = tostring(a2 or unit)
             PC.Print("Disenchant: the game said: " .. msg)

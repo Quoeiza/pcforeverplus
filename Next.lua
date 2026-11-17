@@ -102,7 +102,7 @@ function Next:CraftStep(s, e, n, tip)
         s.run = nil
         return s
     end
-    s.text = ("Craft %d %s"):format(n, e.r.name)
+    s.text = "Craft " .. PC:CraftCount(n, e.r)
     s.tip = tip
     s.run = function() Craft:Quick(e, n) end
     return s
@@ -133,7 +133,7 @@ function Next:ComputeRaw()
         end
     end
     -- any mailbox step can be skipped for an hour
-    if s and not s.skip and PC.Mail and ((s.text or ""):find("mailbox") or s.text == "Collect AH mail") then
+    if s and not s.skip and PC.Mail and ((s.text or ""):find("mailbox") or s.text == "Collect auction mail") then
         s.skip = function() PC.Mail:Snooze() end
         s.skipTip = "Not now: I'll remind you about the mail again in an hour."
     end
@@ -161,7 +161,7 @@ function Next:ComputeRaw()
         return s
     end
     mark("tolearn")
-    if s and s.dest and PC.Travel and PC:RouteOn() then
+    if s and s.dest and PC.Travel and PC:RouteOn() and not PC.Travel:AtPlace(s.dest) then
         local ok, way = pcall(PC.Travel.BestWay, PC.Travel, s.dest)
         if ok and way and way.steps and #way.steps > 0 then
             s.way = way
@@ -227,6 +227,8 @@ function Next:ComputeStep()
     mark("lists")
     -- purging clears bag space: buying waits until it's done
     if Sell.purge then ahList, vendorList = {}, {} end
+    -- only what keeps its craft at the minimum profit (a stop is said once, at the AH or vendor)
+    ahList, vendorList = B:ProfitList(ahList), B:ProfitList(vendorList, true)
     if Sell.purge and #Sell:PurgeList() == 0 then Sell.purge = nil; PC.Buy:Say("|cff40ff40Purge done: nothing left to purge.|r") end
     local sell, vsell = {}, {} -- crafted goods for the AH / for a vendor (whichever pays more)
     for _, it in ipairs(Sell:Items()) do
@@ -302,7 +304,7 @@ function Next:ComputeStep()
         elseif not PC.Mail.busy and (PC.Mail:HasMoney() or PC:FreeBagSlotsOnly() > (PC.BUY_RESERVE or 1)) then
             -- (bags full and only items left: nothing to take now - that's handled below, no loop)
             local M = PC.Mail
-            local s0 = { text = "Collect AH mail", cat = "Mail", tip = ("%d AH mail%s to take: purchases, sales gold, returns."):format(M:Count(), M:Count() == 1 and "" or "s"),
+            local s0 = { text = "Collect auction mail", cat = "Mail", tip = ("%d auction mail%s to take: purchases, sales gold, returns."):format(M:Count(), M:Count() == 1 and "" or "s"),
                 run = function() M:Collect() end }
             s0.skip = function() M:Snooze() end
             return s0
@@ -379,12 +381,12 @@ function Next:ComputeStep()
                 local deVal = Sy and Sy:CanDisenchant(it.id) and Sy:EnchantingSkill() and Sy:Value(it.id) or nil
                 if deVal and deVal >= vend then
                     s.text = ("Too many %s: disenchant %d"):format(it.name, extra)
-                    s.tip = ("More than the AH will buy any time soon, and your bags and bank are full. Disenchanting %d gives about %s of materials each (a vendor pays %s)."):format(
+                    s.tip = ("More than the Auction House will buy any time soon, and your bags and bank are full. Disenchanting %d gives about %s of materials each (a vendor pays %s)."):format(
                         extra, PC:Money(deVal, false, true), PC:Money(vend, false, true))
                     s.run = function() Sy:Queue(it.id, extra); PC:RefreshUI() end
                 else
                     s.text = ("Too many %s: vendor %d"):format(it.name, extra)
-                    s.tip = ("More than the AH will buy any time soon, and your bags and bank are full. A vendor pays %s each; the rest still go on the AH."):format(PC:Money(vend, false, true))
+                    s.tip = ("More than the Auction House will buy any time soon, and your bags and bank are full. A vendor pays %s each; the rest still go to auction."):format(PC:Money(vend, false, true))
                     s.run = function()
                         PC.cdb.dumpVendor = PC.cdb.dumpVendor or {}
                         PC.cdb.dumpVendor[it.id] = extra
@@ -392,7 +394,7 @@ function Next:ComputeStep()
                     end
                 end
                 s.skip = function() PC.cdb.extraSkip = PC.cdb.extraSkip or {}; PC.cdb.extraSkip[it.id] = time(); PC:RefreshUI() end
-                s.skipTip = "Keep them all for the AH."
+                s.skipTip = "Keep them all for auction."
                 if not (PC.cdb.extraSkip and PC.cdb.extraSkip[it.id] and time() - PC.cdb.extraSkip[it.id] < 3600)
                     and not (PC.cdb.dumpVendor and PC.cdb.dumpVendor[it.id]) then
                     return s
@@ -456,16 +458,25 @@ function Next:ComputeStep()
     end
     -- something in progress at the AH comes first
     local b = B.buy
-    -- a request the AH never answered (15 seconds): drop it instead of "Waiting..." forever
-    if b and b.state ~= "quoted" and b.t0 and GetTime() - b.t0 > 15 then
-        pcall(function() if C_AuctionHouse and C_AuctionHouse.CancelCommoditiesPurchase then C_AuctionHouse.CancelCommoditiesPurchase() end end)
-        B.buy, b = nil, nil
-        B:Say("|cffff8040No answer from the AH: moved on. Click to try again.|r")
+    -- a price request the AH never answered (15 seconds): drop it instead of "Waiting..." forever
+    -- (only a request: a purchase already sent is never dropped, it waits for its outcome)
+    if b and b.state == "quoting" and b.t0 and GetTime() - b.t0 > 15 then
+        B:Cancel()
+        b = nil
+        B:Say("|cffff8040No price from the Auction House. Click to try again.|r")
     end
+    local sent = B:Unsettled()
     if b and b.state == "quoted" then
         s.text = "Confirm " .. PC:Money(b.total or 0, false, true)
         s.tip = ("Buy %d %s for %s"):format(b.qty, b.name, PC:Money(b.total or 0))
         s.run = function() B:Confirm() end
+        return s
+    elseif (b and b.state == "buying") or (sent and PC.ahOpen) then
+        -- sent: nothing more is bought on the AH until the AH and your gold both say how it went
+        s.text = "Waiting for the Auction House to confirm..."
+        s.tip = sent and ("%d %s, sent %d sec ago. Nothing else is bought until the Auction House answers."):format(
+            sent.qty, PC:ItemName(sent.id) or "", math.floor(GetTime() - sent.t)) or nil
+        s.run = function() B:SayWaiting() end
         return s
     elseif b then
         s.text = "Waiting... (click to cancel)"
@@ -498,7 +509,7 @@ function Next:ComputeStep()
         end
         if not missing and cost > budget then
             s.text = "Trim plan to fit your gold"
-            s.tip = ("What's left to buy, plus the AH fees to post what you make, comes to about %s; you have %s to spend.\nOne click shrinks the plan (least profitable crafts first) until it fits."):format(
+            s.tip = ("What's left to buy, plus the auction fees to post what you make, comes to about %s; you have %s to spend.\nOne click shrinks the plan (least profitable crafts first) until it fits."):format(
                 PC:Money(cost, false, true), PC:Money(budget, false, true))
             s.run = function()
                 local n = UI:TrimToGold()
@@ -511,14 +522,15 @@ function Next:ComputeStep()
     local flips = {}
     for _, e in ipairs(entries) do if e.route == "Vendor" then flips[#flips + 1] = e end end
     if #flips > 0 and (#ahList > 0 or #vendorList > 0) and not Next:FlipsOK() then
-        local names, profit = {}, 0
+        local names, ahProfit, vProfit = {}, 0, 0
         for _, e in ipairs(flips) do
             names[#names + 1] = ("%d %s"):format(e.planCount or 0, e.r.name)
-            profit = profit + (e.profit or 0) * (e.planCount or 0)
+            ahProfit = ahProfit and e.ahProfit and ahProfit + e.ahProfit * (e.planCount or 0) or nil
+            vProfit = vProfit + (e.vendorProfit or e.profit or 0) * (e.planCount or 0)
         end
         s.text = "Vendor flips: buy materials?"
-        s.tip = ("Crafted to sell straight to a vendor, about %s profit:\n%s\nClick: buy their materials. Skip: take the flips out of the plan."):format(
-            PC:Money(profit, false, true), table.concat(names, "\n"))
+        s.tip = ("Crafted to sell to a vendor. Vendor Profit %s, Auction Profit %s:\n%s\nClick: buy the materials. Skip: drop them from the plan."):format(
+            PC:Money(vProfit, true, true), PC:Money(ahProfit, true, true), table.concat(names, "\n"))
         -- the choice is right on the bar (no pop-up that can get lost behind windows)
         s.run = function() Next:FlipsGo() end
         s.skip = function() Next:FlipsSkip(flips) end
@@ -528,17 +540,20 @@ function Next:ComputeStep()
     if PC.ahOpen then
         -- prices still coming in: nothing gets bought on stale numbers
         if B:Scanning() and (#ahList > 0 or #sell > 0) then
-            s.text = "Scanning the AH..."
+            s.text = "Scanning the Auction House..."
             s.tip = "Buying and posting wait until the scan is done, so they use today's prices."
             return s
         end
-        local it = B:NextToBuy()
+        -- the next thing to buy, from the list settled when you walked up (what's still to buy kept
+        -- current, purchases sent a moment ago included); Start works the amount out again
+        local it
+        for _, x in ipairs(ahList) do if B:CanBuy(x.id) then it = x break end end
         -- (AH purchases go to the mailbox: no bag room needed to buy them)
         if it then
             local cost = PC:CostForQty(it.id, it.qty)
             s.text = ("Buy %d %s"):format(it.qty, it.name or "")
-            s.tip = cost and ("About " .. PC:Money(cost) .. " on the AH") or nil
-            s.run = function() B:Start(it, false) end
+            s.tip = cost and ("About " .. PC:Money(cost) .. " at auction") or nil
+            s.run = function() B:Start(it, false, true) end
             return s
         end
         -- classic-style AH: can't buy for you, but can run the search so the listing is one click away
@@ -557,8 +572,8 @@ function Next:ComputeStep()
             -- (AH purchases go to the mailbox: no bag room needed)
             local cap = B:VendorPrice(first.id)
             s.text = ("Find %d %s"):format(first.qty, first.name or "")
-            s.tip = ("Searches the AH for it. Buy out %d%s."):format(first.qty,
-                cap and (" at no more than " .. PC:Money(cap, false, true) .. " each: a vendor sells it for that") or "")
+            s.tip = ("Searches the Auction House for it. Buy out %d%s."):format(first.qty,
+                cap and (" under " .. PC:Money(cap, false, true) .. " each (what a vendor charges)") or "")
             s.run = function()
                 if PC.UI and PC.UI.StaleScan and not PC.UI.StaleScan:Check() then return end
                 B:SearchAH(first)
@@ -570,11 +585,6 @@ function Next:ComputeStep()
         -- already standing at the AH: post what's sellable in your bags now, crafting left or not
         -- (the craft-first rule is only about not sending you here too early)
         if Sell:Supported() and #sell > 0 then
-            if Sell.posting then
-                s.text = "Posting..."
-                s.tip = "Listing everything you crafted, one stack at a time."
-                return s
-            end
             local units, stacks, names = 0, 0, {}
             for _, it in ipairs(sell) do
                 units = units + it.sellN
@@ -592,14 +602,14 @@ function Next:ComputeStep()
             -- the deposit is paid up front: not enough gold for it, say so instead of a post that fails
             local money = GetMoney and GetMoney() or 0
             local dep = first.deposit and first.sellN > 0 and math.ceil(first.deposit * n / first.sellN) or 0
-            if dep > money and Next:MailForGold(s, ("You need %s for the AH deposit and have %s. You have mail: it may be gold from your sales."):format(PC:Money(dep, false, true), PC:Money(money, false, true))) then
+            if dep > money and Next:MailForGold(s, ("You need %s for the auction deposit and have %s. You have mail: it may be gold from your sales."):format(PC:Money(dep, false, true), PC:Money(money, false, true))) then
                 return s
             end
             if dep > money then
                 s.text = ("Need %s to post (fee)"):format(PC:Money(dep, false, true))
                 local spare = {}
                 for _, it in ipairs(PC.VendorAuto and PC.VendorAuto:Leftovers() or {}) do spare[#spare + 1] = it.name end
-                s.tip = ("The AH takes a %s deposit to list %d %s and you have %s.\n"):format(PC:Money(dep, false, true), n, first.name, PC:Money(money, false, true))
+                s.tip = ("The Auction House takes a %s deposit to list %d %s and you have %s.\n"):format(PC:Money(dep, false, true), n, first.name, PC:Money(money, false, true))
                     .. (#spare > 0 and ("Sell leftover materials at a vendor first: " .. table.concat(spare, ", ") .. ".") or "Sell something at a vendor or collect your mail, then come back.")
                 s.run = function() PC.Buy:Say("|cffff8040" .. s.tip:gsub("\n", " ") .. "|r") end
                 return s
@@ -618,7 +628,7 @@ function Next:ComputeStep()
         elseif #sell > 0 and ready then
             -- already here, but this client can't post from an addon: say what to do, don't send you to the AH
             s.text = ("Post %d %s yourself"):format(sell[1].sellN, sell[1].name)
-            s.tip = ("Use the AH's Auctions tab: %s each."):format(PC:Money(sell[1].price, false, true))
+            s.tip = ("Use the Auction House's Auctions tab: %s each."):format(PC:Money(sell[1].price, false, true))
             return s
         end
         -- something left to buy that the button can't buy for you here: the search, never "Go to the AH"
@@ -652,8 +662,17 @@ function Next:ComputeStep()
         local units, names = 0, {}
         for _, it in ipairs(vsell) do units = units + it.sellN; names[#names + 1] = ("%d %s at %s"):format(it.sellN, it.name, PC:Money(it.vendorPrice, false, true)) end
         s.text = ("Sell %d crafted to vendor"):format(units)
-        s.tip = "The vendor pays more than the AH for these (after its cut), and it's still a profit:\n" .. table.concat(names, "\n")
+        s.tip = "The vendor pays more than the Auction House for these (after its cut), and it's still a profit:\n" .. table.concat(names, "\n")
         s.run = function() PC.VendorAuto:SellCrafted() end
+        return s
+    end
+    if VB:Open() and VB:Busy() then
+        -- one purchase at a time, each waited for in your bags: say so until it's done
+        local j = VB.queue[1]
+        s.text = "Buying from vendor..."
+        s.tip = j and ("%d of %d %s so far, %d more item%s to go."):format(
+            j.got, j.want, j.name, #VB.queue - 1, #VB.queue == 2 and "" or "s") or "Waiting for the last purchase to reach your bags."
+        s.run = function() PC.Buy:Say("|cffffd100" .. s.tip .. "|r") end
         return s
     end
     if VB:Open() then
@@ -674,7 +693,7 @@ function Next:ComputeStep()
             return s
         end
     end
-    if PC.Bank and PC.Bank:Open() then
+    if PC.Bank and PC.Bank:Open() and PC:UseBank() then
         local text, tip, items = PC.Bank:NextText()
         if text then
             s.text, s.tip, s.items, s.cat = text, tip, items, "Bank"
@@ -686,7 +705,7 @@ function Next:ComputeStep()
     if PC.Mail and PC.Mail:Open() and PC.Mail:Count() > 0 and PC:FreeBagSlotsOnly() <= (PC.BUY_RESERVE or 1) and not PC.Mail:HasMoney() then
         PC.Mail.itemsWaiting = PC.Mail:Count()
     elseif PC.Mail and PC.Mail:Open() and PC.Mail:Count() > 0 then
-        s.text = "Collect AH mail"
+        s.text = "Collect auction mail"
         s.run = function() PC.Mail:Collect() end
         return s
     end
@@ -725,7 +744,7 @@ function Next:ComputeStep()
                         s.dest = p
                         return s
                     else
-                        s.text = ("Craft %d %s"):format(n, e.r.name)
+                        s.text = "Craft " .. PC:CraftCount(n, e.r)
                         s.run = function() Craft:Go(e, n) end
                         return s
                     end
@@ -844,8 +863,8 @@ function Next:ComputeStep()
     if first and not first.unknown then
         local p = first.place
         local what = (first.kind == "vendor" and ("Vendor: " .. (p.name or "")))
-            or (first.kind == "ah" and (ahBuy and ("Go to the AH: buy %d %s%s"):format(ahList[1].qty, ahList[1].name or "", #ahList > 1 and (" (+%d)"):format(#ahList - 1) or "")
-                or (#sell > 0 and ready) and "Go to the AH to sell" or "Go to the AH: check undercuts"))
+            or (first.kind == "ah" and (ahBuy and ("Go to the Auction House: buy %d %s%s"):format(ahList[1].qty, ahList[1].name or "", #ahList > 1 and (" (+%d)"):format(#ahList - 1) or "")
+                or (#sell > 0 and ready) and "Go to the Auction House to sell" or "Go to the Auction House: check undercuts"))
             or (first.kind == "bank" and "Go to the bank")
             or "Go to the mailbox"
         s.text = what
@@ -867,13 +886,13 @@ function Next:ComputeStep()
                 s.simple = "Sell at vendor"
             end
         elseif first.kind == "ah" then
-            s.simple = (ahBuy and ("Buy %d %s on AH"):format(ahList[1].qty, ahList[1].name or "") .. (#ahList > 1 and (" (+%d more)"):format(#ahList - 1) or ""))
-                or ((#sell > 0 and ready) and ("Post " .. few(sell, function(it) return it.sellN .. " " .. it.name end) .. " on AH"))
-                or "Check your auctions on AH"
+            s.simple = (ahBuy and ("Buy %d %s at auction"):format(ahList[1].qty, ahList[1].name or "") .. (#ahList > 1 and (" (+%d more)"):format(#ahList - 1) or ""))
+                or ((#sell > 0 and ready) and ("Post " .. few(sell, function(it) return it.sellN .. " " .. it.name end) .. " at auction"))
+                or "Check your auctions"
         elseif first.kind == "bank" then
             s.simple = bankTake and "Take your materials out of the bank" or "Put spare items in the bank"
         else
-            s.simple = "Collect your AH mail"
+            s.simple = "Collect your auction mail"
         end
         local tip = { P:Describe(p, first.d) }
         if first.kind == "bank" then
@@ -903,7 +922,7 @@ function Next:ComputeStep()
             local names = {}
             for _, it in ipairs(ahList) do
                 local cap = B:VendorPrice(it.id)
-                names[#names + 1] = it.qty .. " " .. (it.name or "") .. (cap and (" (up to " .. PC:Money(cap, false, true) .. " each)") or "")
+                names[#names + 1] = it.qty .. " " .. (it.name or "") .. (cap and (" (under " .. PC:Money(cap, false, true) .. " each)") or "")
             end
             if #names > 0 then tip[#tip + 1] = "Buy there: " .. table.concat(names, ", ") end
             if #sell > 0 and ready then
@@ -918,7 +937,7 @@ function Next:ComputeStep()
                 Next:MailMatsStep(s, entries, planMail)
                 tip[#tip + 1] = s.matsTip
             else
-                tip[#tip + 1] = n > 0 and (n .. " AH purchase" .. (n == 1 and "" or "s") .. " waiting") or "You have new mail."
+                tip[#tip + 1] = n > 0 and (n .. " auction purchase" .. (n == 1 and "" or "s") .. " waiting") or "You have new mail."
             end
         end
         if first.kind == "vendor" then
@@ -928,7 +947,7 @@ function Next:ComputeStep()
             if #vsell > 0 and ready then
                 local vn = {}
                 for _, it in ipairs(vsell) do vn[#vn + 1] = it.sellN .. " " .. it.name end
-                tip[#tip + 1] = "Sell here (pays more than the AH): " .. table.concat(vn, ", ")
+                tip[#tip + 1] = "Sell here (pays more than the Auction House): " .. table.concat(vn, ", ")
             end
             if #leftovers > 0 then
                 local back = {}
@@ -942,7 +961,7 @@ function Next:ComputeStep()
             tip[#tip + 1] = "|cff888888Skip (or right-click): not for an hour.|r"
         end
         if first.kind == "ah" and dueAway and not ahBuy and not (#sell > 0 and ready) then
-            tip[#tip + 1] = ("You're in town: at the AH the button runs %s's undercut scan (asked once per visit)."):format(Undercut:Helper() or "Auctionator")
+            tip[#tip + 1] = ("You're in town: at the Auction House the button runs %s's undercut scan (asked once per visit)."):format(Undercut:Helper() or "Auctionator")
             s.skip = function() Undercut:SkipScan() end
         end
         local fly = P:FlightHint(p)
@@ -952,8 +971,8 @@ function Next:ComputeStep()
     elseif offload and #sell > 0 then
         local sn = {}
         for _, it in ipairs(sell) do sn[#sn + 1] = it.sellN .. " " .. it.name end
-        s.text = "Go to the AH to sell"
-        s.tip = "Sell there first (it frees bag room): " .. table.concat(sn, ", ") .. "\nProfitCrafter learns where the AH is the first time you use it."
+        s.text = "Go to the Auction House to sell"
+        s.tip = "Sell there first (it frees bag room): " .. table.concat(sn, ", ") .. "\nProfitCrafter learns where the Auction House is the first time you use it."
         s.skip = function() PC:SnoozeSell() end
     elseif offload and #vsell > 0 then
         s.text = "Visit a vendor"; s.tip = ("To sell %d %s first: it frees bag room."):format(vsell[1].sellN, vsell[1].name)
@@ -961,12 +980,12 @@ function Next:ComputeStep()
         s.text = "Go to the bank"
         s.tip = "Some of your plan's materials are in your bank: take them out before buying more."
     elseif #ahList > 0 then
-        s.text = ("Go to the AH: buy %d %s%s"):format(ahList[1].qty, ahList[1].name or "", #ahList > 1 and (" (+%d)"):format(#ahList - 1) or "")
+        s.text = ("Go to the Auction House: buy %d %s%s"):format(ahList[1].qty, ahList[1].name or "", #ahList > 1 and (" (+%d)"):format(#ahList - 1) or "")
         local names = {}
         for _, it in ipairs(ahList) do names[#names + 1] = it.qty .. " " .. (it.name or "") end
-        s.tip = "Buy there: " .. table.concat(names, ", ") .. "\nProfitCrafter learns where the AH is the first time you use it."
+        s.tip = "Buy there: " .. table.concat(names, ", ") .. "\nProfitCrafter learns where the Auction House is the first time you use it."
     elseif #vendorList > 0 then s.text = "Visit a vendor"; s.tip = "For " .. (vendorList[1].name or "materials") .. ". ProfitCrafter learns vendors as you use them."
-    elseif #vsell > 0 and ready then s.text = "Visit a vendor"; s.tip = ("To sell %d %s: a vendor pays more than the AH."):format(vsell[1].sellN, vsell[1].name)
+    elseif #vsell > 0 and ready then s.text = "Visit a vendor"; s.tip = ("To sell %d %s: a vendor pays more than the Auction House."):format(vsell[1].sellN, vsell[1].name)
     elseif #leftovers > 0 then
         s.text = "Visit a vendor"; s.tip = "To sell back " .. leftovers[1].n .. " " .. leftovers[1].name .. " left over from the plan."
         s.skip = function() PC.VendorAuto:AskLeftovers(leftovers) end
@@ -975,7 +994,7 @@ function Next:ComputeStep()
         Next:MailMatsStep(s, entries, planMail)
         s.tip = s.matsTip
         s.dest = PC.Places and PC.Places:Nearest("mail") or nil
-    elseif mailN > 0 then s.text = "Go to the mailbox"; s.tip = (PC.Mail and PC.Mail:HasNew()) and "You have new mail." or "Your AH purchases are waiting."
+    elseif mailN > 0 then s.text = "Go to the mailbox"; s.tip = (PC.Mail and PC.Mail:HasNew()) and "You have new mail." or "Your auction purchases are waiting."
     elseif #craft > 0 and not offload then
         -- opens the profession window itself (to the first recipe to craft), not just ProfitCrafter
         local e = craft[1]
@@ -986,7 +1005,7 @@ function Next:ComputeStep()
         s.items = {}
         for _, it in ipairs(store) do s.items[#s.items + 1] = ("store %d %s"):format(it.qty, it.name or "") end
         s.tip = ("Bags nearly full (%d free): store %s there."):format(PC:FreeBagSlotsOnly(), table.concat(s.items, ", "):gsub("store ", ""))
-    elseif #sell > 0 and ready then s.text = "Go to the AH to sell"; s.skip = function() PC:SnoozeSell() end
+    elseif #sell > 0 and ready then s.text = "Go to the Auction House to sell"; s.skip = function() PC:SnoozeSell() end
     elseif Craft.noRoom then
         PC.VendorAuto:MakeRoomStep(s, Craft.noRoom)
     elseif next(Craft.blocked or {}) then
@@ -1037,8 +1056,13 @@ function Next:ComputeStep()
                 local v = P and P:Nearest("vendor", first.id)
                 s.dest = v
                 if v and v.name then s.text = ("Buy %d %s from %s"):format(first.n, first.name, v.name) end
+            elseif first.where == "stopped" then
+                -- all that's left would lose the minimum profit: nowhere to go for it
+                s.text = ("Stopped buying %s (under %d%% profit)"):format(first.name, PC:MinProfitPct())
+                -- nothing sends you to the AH or a vendor for it, so the plan is cut here (else this step never goes)
+                for _, r in ipairs(rows) do if r.where == "stopped" then PC:AmendPlanSoon(r.id) end end
             else
-                s.text = ("Buy %d %s on the AH"):format(first.n, first.name)
+                s.text = ("Buy %d %s at auction"):format(first.n, first.name)
                 s.dest = P and P:Nearest("ah") or nil
             end
             local lines = {}
@@ -1123,8 +1147,8 @@ function Next:MissingMats(entries)
     local ok, list = pcall(PC.CombinedShoppingList, PC, entries, 1)
     if not ok then return {} end
     local rows, best = {}, nil
-    local rank = { mail = 1, bank = 2, vendor = 3, ah = 4 }
-    local cats = { mail = "Mail", bank = "Bank", vendor = "Vendor", ah = "AH" }
+    local rank = { mail = 1, bank = 2, vendor = 3, ah = 4, stopped = 5 }
+    local cats = { mail = "Mail", bank = "Bank", vendor = "Vendor", ah = "AH", stopped = "AH" }
     for _, it in ipairs(list or {}) do
         if not it.craft and not it.tool and (it.need or 0) > 0 and it.id then
             local short = it.need - PC:BagCount(it.id)
@@ -1138,13 +1162,23 @@ function Next:MissingMats(entries)
                 local buyAt
                 if short > 0 then
                     buyAt = (it.src == "Vendor") and "vendor" or "ah"
+                    -- (what would take the craft under the minimum profit isn't bought: no trip for it)
+                    local vc = buyAt == "vendor" and PC:VendorCost(it.id)
+                    local can, _, pwhy = PC:ProfitableBuyQty(it.id, short, vc and { { p = vc, q = short } } or nil)
+                    if pwhy == "profit" and can < short then
+                        parts[#parts + 1] = ("%d not bought: under %d%% profit"):format(short - can, PC:MinProfitPct())
+                        short = can
+                        if short <= 0 then where = where or "stopped" end
+                    end
+                end
+                if short > 0 then
                     local v = buyAt == "vendor" and PC.Places and PC.Places:Nearest("vendor", it.id)
-                    parts[#parts + 1] = ("buy %d %s"):format(short, buyAt == "vendor" and ("from " .. ((v and v.name) or "a vendor")) or "on the AH")
+                    parts[#parts + 1] = ("buy %d %s"):format(short, buyAt == "vendor" and ("from " .. ((v and v.name) or "a vendor")) or "at auction")
                     where = where or buyAt
                 end
                 local need = it.need - PC:BagCount(it.id)
                 local r = { id = it.id, name = name, n = (where == "vendor" or where == "ah") and short or need, where = where,
-                    cat = cats[where], line = ("get %d %s: %s"):format(need, name, table.concat(parts, ", ")),
+                    cat = (where == "stopped" and buyAt == "vendor") and "Vendor" or cats[where], line = ("get %d %s: %s"):format(need, name, table.concat(parts, ", ")),
                     tip = ("%d %s: %s"):format(need, name, table.concat(parts, ", ")) }
                 rows[#rows + 1] = r
                 if not best or rank[where] < rank[best.where] then best = r end
@@ -1208,7 +1242,7 @@ function Next:MailForGold(s, why)
     if not M:Open() and M.lastVisit and (not M.arrived or M.arrived <= M.lastVisit) then return false end
     if M:Open() then
         if M:Count() == 0 then return false end
-        s.text = "Collect AH mail"
+        s.text = "Collect auction mail"
         s.tip = why
         s.items = { "collect gold from your sales" }
         s.run = function() M:Collect() end
@@ -1245,13 +1279,14 @@ end
 -- Short, generic words for the button: what kind of step it is. The steps list above says exactly what.
 Next.LABELS = {
     { "^Get .+ from the mailbox$", "Travel to the mailbox" }, { "^Get .+ from the bank$", "Travel to the bank" },
-    { "^Buy %d+ .+ on the AH$", "Travel to the AH" }, { "^Buy %d+ .+ at a vendor$", "Travel to a vendor" },
-    { "^Buy %d+ .+ from .+$", "Travel to the vendor" },
+    { "^Buy %d+ .+ at auction$", "Travel to the Auction House" }, { "^Buy %d+ .+ at a vendor$", "Travel to a vendor" },
+    { "^Buy %d+ .+ from .+$", "Travel to the vendor" }, { "^Stopped buying", "Under minimum profit" },
+    { "^Waiting for the Auction House", "Waiting for the Auction House" }, { "^Buying from vendor", "Buying..." },
     { "^Bank: take %d+, store", "Bank items" }, { "^Bank: take", "Take from bank" }, { "^Bank: store", "Store items" },
     { "^Go to the bank", "Travel to the bank" }, { "^Go to the mailbox", "Travel to the mailbox" },
-    { "^Go to the AH", "Travel to the AH" }, { "^Visit a vendor", "Travel to a vendor" }, { "^Find a ", "Travel to a station" },
+    { "^Go to the Auction House", "Travel to the Auction House" }, { "^Visit a vendor", "Travel to a vendor" }, { "^Find a ", "Travel to a station" },
     { "^Find %d", "Find materials" },
-    { "^Collect AH mail", "Collect mail" }, { "^Buy from vendor", "Buy materials" },
+    { "^Collect auction mail", "Collect mail" }, { "^Buy from vendor", "Buy materials" },
     { "^Buy %a+: ", "Buy recipe" }, { "^Buy a .+ at a vendor$", "Buy tool at vendor" },
     { "^Buy a ", "Buy tool" }, { "^Buy ", "Buy materials" }, { "^Train ", "Train recipe" },
     { "^Confirm ", "Confirm purchase" }, { "^Post all", "Post items" }, { "^Post %d+ .* yourself", "Post items yourself" }, { "^Post ", "Post items" },

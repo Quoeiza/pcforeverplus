@@ -18,6 +18,7 @@ local ACCEPT_MAX_AGE = 3 * 86400    -- ignore shared prices older than 3 days
 local REQUEST_COOLDOWN = 10 * 60    -- ask others for prices at most every 10 minutes
 local REPLY_COOLDOWN = 5 * 60       -- answer requests at most every 5 minutes
 local MAX_ITEMS = 400               -- most prices sent in one share
+local OWN_SCAN_WINS = 60            -- seconds your own scan of an item beats other players' reports
 
 local Share = {}
 PC.Share = Share
@@ -476,13 +477,21 @@ function Share:OnMessage(text, sender)
     -- Someone else already answered with data at least as new as ours: no need to reply too
     if self.pendingReply and stamp >= (PC.db.scanTime[PC:Faction()] or 0) then self.pendingReply = nil end
 
+    -- a clock a little ahead: never stamp prices with a time that hasn't come yet (it would block
+    -- newer prices, your own included, until that time passed)
+    if stamp > now then stamp = now end
+
     local prices, checked, supply, source = PC:Prices(), PC:Checked(), PC:Supply(), PC:Source()
     local applied = 0
     for id, p, q in body:gmatch("(%d+):(%d+):(%d+)") do
         id, p, q = tonumber(id), tonumber(p), tonumber(q)
         if id and p and p > 0 and p < 1e10 then
-            -- Only take it if it's newer than what we have
-            if (checked[id] or 0) < stamp then
+            -- your own scan (or live listings read) of it in the last minute wins over anyone's report:
+            -- yours is what's on the AH right now
+            local t = checked[id]
+            local ownFresh = t and not source[id] and (now - t <= OWN_SCAN_WINS or stamp - t <= OWN_SCAN_WINS)
+            -- otherwise only take it if it's newer than what we have
+            if not ownFresh and (t or 0) < stamp then
                 -- Guard against bad data: ignore prices wildly off from what this item usually costs
                 local _, usual = PC:Trend(id)
                 if not usual or (p < usual * 5 and p > usual / 5) then

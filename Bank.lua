@@ -17,6 +17,18 @@ local SlotsNeeded -- defined below (Plan uses it)
 local CountIn     -- defined below (moving uses it)
 
 Bank.BAG_RESERVE = 6   -- free bag slots to keep: below this, spare materials go to the bank
+
+-- Your bags' slots: read once per refresh (each list here went through every slot again; nothing moves
+-- in the middle of a refresh)
+local function MyBagSlots()
+    local memo = PC:Memo()
+    local s = memo and memo.bankBagSlots
+    if not s then
+        s = PC.BagSlots and PC.BagSlots() or {}
+        if memo then memo.bankBagSlots = s end
+    end
+    return s
+end
 Bank.BANK_RESERVE = 2  -- free bank slots never filled
 
 -- The bank's containers: the main bank and its bags (never one of your own bags)
@@ -97,7 +109,10 @@ function Bank:Scan()
     return PC.cdb.bank
 end
 
-function Bank:Known() return PC.cdb and PC.cdb.bank end
+function Bank:Known()
+    if not PC:UseBank() then return nil end -- (Settings: your bank is left alone)
+    return PC.cdb and PC.cdb.bank
+end
 
 -- Where everything sits right now, bags and bank, as one string: changes when you move or sort
 function Bank:Signature()
@@ -136,6 +151,9 @@ Bank.KNOWN_TOOLS = {
 }
 
 function Bank:Allowed()
+    -- (asked by every list here, several times a refresh: worked out once per refresh)
+    local memo = PC:Memo()
+    if memo and memo.bankAllowed then return memo.bankAllowed end
     local ok = {}
     for _, r in pairs(PC.cdb and PC.cdb.recipes or {}) do
         if r.output then ok[r.output] = "crafted" end
@@ -156,6 +174,7 @@ function Bank:Allowed()
             or n:find("fishing pole", 1, true) or n:find("herbal", 1, true)
         if not gather then ok[id] = "tool" end
     end
+    if memo then memo.bankAllowed = ok end
     return ok
 end
 
@@ -336,7 +355,8 @@ function Bank:Leftovers()
         if n > 0 and kind and kind ~= "crafted" and kind ~= "tool" and not PC:IsTool(id) and not needed[id] then
             local best
             for _, e in ipairs(UI.allEntries) do
-                if e.profit and e.profit > 0 then
+                -- (a craft to suggest: one that clears the minimum profit, and for the AH, sold today)
+                if e.profit and e.profit > 0 and PC:MeetsMin(e) and PC:SalesOK(e) then
                     for _, rg in ipairs(e.r.reagents or {}) do
                         local uses = false
                         for _, rid in ipairs(PC:ReagentIDs(rg)) do if rid == id then uses = true end end
@@ -411,7 +431,7 @@ function Bank:UnusedList()
     local later = PC:LaterMats(ok and list or nil) -- (those go in as "later" already)
     local counts, slots = {}, {}
     local C = C_Container
-    for _, s in ipairs(PC.BagSlots and PC.BagSlots() or {}) do
+    for _, s in ipairs(MyBagSlots()) do
         local quest = false
         if C and C.GetContainerItemQuestInfo then
             local okq, q = pcall(C.GetContainerItemQuestInfo, s.bag, s.slot)
@@ -429,14 +449,14 @@ end
 
 function Bank:StoreList()
     local out = {}
-    if not PC.UI or not PC.cdb or self:Skipped() then return out end
+    if not PC.UI or not PC.cdb or self:Skipped() or not PC:UseBank() then return out end
     -- recipes you bought that you can't learn yet: they wait in the bank (plan or no plan)
     -- (only once you're back in town: a bank on this map, or at the bank)
     local br = PC.cdb.bankRecipes
     local inTown = (self.open or (PC.Bank and PC.Bank.Open and PC.Bank:Open())) or (PC.Places and select(2, PC.Places:Nearest("bank")) ~= nil)
     if br and next(br) and inTown then
         local n = {}
-        for _, sl in ipairs(PC.BagSlots and PC.BagSlots() or {}) do
+        for _, sl in ipairs(MyBagSlots()) do
             if br[sl.id] and not sl.locked then n[sl.id] = (n[sl.id] or 0) + sl.n end
         end
         for id, qty in pairs(n) do
@@ -469,7 +489,7 @@ function Bank:StoreList()
         end
     end
     local counts = {}
-    for _, s in ipairs(PC.BagSlots and PC.BagSlots() or {}) do
+    for _, s in ipairs(MyBagSlots()) do
         if allowed[s.id] and not s.locked then counts[s.id] = (counts[s.id] or 0) + s.n end
     end
     local stash = PC.cdb.stashMats or {}
@@ -511,7 +531,7 @@ function Bank:StoreList()
         local need = target - free - freed
         if need > 0 then
             local full = {}
-            for _, s in ipairs(PC.BagSlots and PC.BagSlots() or {}) do
+            for _, s in ipairs(MyBagSlots()) do
                 local size = PC:StackSize(s.id)
                 if allowed[s.id] == "material" and not s.locked and size > 1 and s.n >= size then
                     full[s.id] = (full[s.id] or 0) + 1
@@ -622,7 +642,7 @@ end
 
 -- Trim a take list to what your bags can hold right now: part stacks fill up first, then free slots
 function Bank:FitTake(list, extra)
-    local bagSlots = PC.BagSlots and PC.BagSlots() or {}
+    local bagSlots = MyBagSlots()
     -- taking out leaves room to work with (never fills the bags back up after a trip that emptied them)
     -- (a reagent bag takes materials too: they're what gets taken out)
     local free = math.max(PC:FreeBagSlotsOnly() + (PC.FreeReagentBagSlots and PC:FreeReagentBagSlots() or 0) + (extra or 0) - (self.BAG_RESERVE or 6), 0)
@@ -645,7 +665,7 @@ function Bank:FitTake(list, extra)
 end
 
 function Bank:TakeFits(list)
-    local bagSlots = PC.BagSlots and PC.BagSlots() or {}
+    local bagSlots = MyBagSlots()
     local need = 0
     for _, it in ipairs(list) do need = need + SlotsNeeded(it.id, it.qty, bagSlots) end
     local free = PC:FreeBagSlotsOnly()
@@ -711,18 +731,20 @@ function Bank:Queue(itemID, qty, fromBags, toBags, dir)
     end
 end
 
-local function ClearCursor()
+-- (named apart from the game's ClearCursor: a local of that name called itself, a stack overflow whenever
+-- an item was on the cursor)
+local function DropCursor()
     if CursorHasItem and CursorHasItem() and ClearCursor then ClearCursor() end
 end
 
 function Bank:Step()
-    if not self.open then self.busy = false; ClearCursor() return end
+    if not self.open then self.busy = false; DropCursor() return end
     -- did the last move land? The server takes a moment: the item shows up on the far side (or leaves
     -- its old slot) a little after the drop, so look a few times before giving up on it
     local last = self.last
     if last and last.refused then
         -- the game said that bag can't hold it: put it back, never try that bag for it again, retry
-        if ClearCursor then ClearCursor() end
+        DropCursor()
         PC.refusedBag[last.tb .. ":" .. last.id] = true
         self.last = nil
         if last.m and (last.m.refusals or 0) < 4 then
@@ -753,7 +775,7 @@ function Bank:Step()
             C_Timer.After(self.MOVE_GAP, function() PC:Safe("bank", Bank.Step, Bank) end)
             return
         else
-            ClearCursor()
+            DropCursor()
             self.last = nil
             -- didn't land: try the other way of moving it (drag-and-drop vs right-click) before giving up
             local other = last.method == "drop" and "use" or "drop"
@@ -838,7 +860,7 @@ end
 
 function Bank:Done()
     self.busy = false
-    ClearCursor()
+    DropCursor()
     self:Scan()
     self.sig = self:Signature() -- our own moves aren't "you reorganised"
     local lines = {}
@@ -943,6 +965,9 @@ function Bank:OnEvent(event, a1, a2)
     PC:Safe("bank", function()
         if event == "UI_ERROR_MESSAGE" then
             if Bank.busy then
+                -- (the game keeps its messages secret at times: one that can't be read is passed over)
+                if PC.IsSecret(a1) then a1 = nil end
+                if PC.IsSecret(a2) then a2 = nil end
                 local msg = type(a2) == "string" and a2 or (type(a1) == "string" and a1) or nil
                 if msg then Bank.errors = Bank.errors or {}; Bank.errors[msg] = true end
                 if Bank.last and (WrongBag(a2) or WrongBag(a1)) then Bank.last.refused = true end

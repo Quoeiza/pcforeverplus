@@ -6,7 +6,6 @@ local PC = ns.PC
 local function Safe(name, fn, ...) return PC:Safe(name, fn, ...) end
 local On = PC.AutoOn
 local Bags = PC.BagSlots
-local UseBagItem = PC.UseBagItem
 local Sell = PC.Sell
 
 ---------------------------------------------------------------------------
@@ -121,7 +120,7 @@ end
 
 -- Bought or sold something (AH, vendor): gathered for a moment, then one note for all of it
 -- section: "Bought on the AH", "Bought from a vendor", "Sold to a vendor"
-Toast.SECTIONS = { "Bought on the AH", "Bought from a vendor", "Sold to a vendor" }
+Toast.SECTIONS = { "Bought at auction", "Bought from a vendor", "Sold to a vendor" }
 function PC:Activity(section, item, qty, money)
     if not section or not item then return end
     local a = Toast.activity or { }
@@ -168,6 +167,11 @@ function PC:CraftedOne(r)
 end
 
 function Toast:FlushActivity()
+    -- vendor buying or selling still under way (one item at a time): one note for all of it once it's done
+    local VB = PC.VendorBuy
+    if PC.selling or (VB and VB.Busy and VB:Busy()) then
+        return PC:Debounce("activity toast", 1.5, function() Safe("notes", Toast.FlushActivity, Toast) end)
+    end
     local a = self.activity
     self.activity = nil
     if not a then return end
@@ -243,6 +247,8 @@ function Mail:List()
             elseif not invoiceType and (itemCount or 0) > 0 then
                 -- an expired or cancelled auction coming back (the AH sends it with no invoice)
                 local _, _, sender, subject = GetInboxHeaderInfo(i)
+                if PC.IsSecret(sender) then sender = nil end
+                if PC.IsSecret(subject) then subject = nil end
                 local fromAH = (sender or ""):lower():find("auction") or (subject or ""):lower():find("auction")
                 if fromAH then out[#out + 1] = { index = i, kind = "returned", items = itemCount, cancelled = (subject or ""):lower():find("cancel") and true or false } end
             end
@@ -340,8 +346,8 @@ function Mail:Done()
         lines[#lines + 1] = header
         for _, r in ipairs(rows) do lines[#lines + 1] = "  " .. r end
     end
-    section("Items (your AH purchases):", self.got.items)
-    section("Back from the AH (unsold or cancelled):", self.got.returned)
+    section("Items (your auction purchases):", self.got.items)
+    section("Back from the Auction House (unsold or cancelled):", self.got.returned)
     if self.got.money > 0 then
         lines[#lines + 1] = "Gold: " .. PC:Money(self.got.money) .. " from sales of"
         local rows = {}
@@ -371,7 +377,7 @@ local function NoteVendorBuy(index, qty)
     local id = GetMerchantItemID and GetMerchantItemID(index)
     if not id and GetMerchantItemLink then
         local link = GetMerchantItemLink(index)
-        id = link and tonumber(link:match("item:(%d+)"))
+        id = type(link) == "string" and not PC.IsSecret(link) and tonumber(link:match("item:(%d+)")) or nil
     end
     if id and PC.cdb then
         PC.cdb.vendorBought = PC.cdb.vendorBought or {}
@@ -516,26 +522,20 @@ function VendorAuto:Leftovers(entries, includeKept)
     return out
 end
 
--- Crafted goods a vendor pays more for than the AH (and still at a profit): sell them here
+-- Crafted goods a vendor pays more for than the AH (and still at a profit): sell them here, exactly
+-- what's above your Keep number (a stack is split if it has to be). Returns how many it went to sell.
 function VendorAuto:SellCrafted()
     if not PC.merchantOpen then return 0 end
-    local go = {}
-    for _, it in ipairs(Sell:Items()) do if it.vendor and it.sellN > 0 then go[it.id] = it.sellN end end
-    local sold, value = 0, 0
-    -- smallest stacks first so what you keep stays in whole stacks
-    local slots = Bags()
-    table.sort(slots, function(a, b) return a.n < b.n end)
-    for _, bs in ipairs(slots) do
-        local left = go[bs.id]
-        if left and left >= bs.n and not bs.locked then -- never dips into what you keep
-            UseBagItem(bs.bag, bs.slot)
-            go[bs.id] = left - bs.n
-            sold = sold + bs.n; value = value + (PC:SellPrice(bs.id) or 0) * bs.n
-        end
+    local list, n = {}, 0
+    for _, it in ipairs(Sell:Items()) do
+        if it.vendor and it.sellN > 0 then list[#list + 1] = { id = it.id, n = it.sellN }; n = n + it.sellN end
     end
-    if sold > 0 then PC.Buy:Say(("|cff40ff40Sold %d crafted to the vendor for %s.|r"):format(sold, PC:Money(value, false, true))) end
-    PC:RefreshUI()
-    return sold
+    if n == 0 then return 0 end
+    local ok = PC:SellExact(list, function(res)
+        local t = PC:SellSummary(res, true)
+        if t ~= "" then PC.Buy:Say(t) end
+    end, true)
+    return ok and n or 0
 end
 
 -- Things in your bags the plan has no use for, cheapest per bag slot first: spare materials,
@@ -558,23 +558,13 @@ end
 
 function VendorAuto:SellSpare(maxSlots)
     if not PC.merchantOpen then return 0 end
-    local want, used = {}, 0
+    local list, n, used = {}, 0, 0
     for _, it in ipairs(self:SpareList()) do
         if maxSlots and used >= maxSlots then break end
-        want[it.id] = it.n; used = used + it.slots
+        list[#list + 1] = { id = it.id, n = it.n }; n = n + it.n; used = used + it.slots
     end
-    local sold, value = 0, 0
-    for _, bs in ipairs(Bags()) do
-        local n = want[bs.id]
-        if n and n > 0 and not bs.locked and bs.n <= n then
-            UseBagItem(bs.bag, bs.slot)
-            want[bs.id] = n - bs.n; sold = sold + bs.n
-            value = value + (PC:SellPrice(bs.id) or 0) * bs.n
-        end
-    end
-    if sold > 0 then PC.Buy:Say(("|cff40ff40Sold %d spare item%s for %s to make room.|r"):format(sold, sold == 1 and "" or "s", PC:Money(value, false, true))) end
-    PC:RefreshUI()
-    return sold
+    if n == 0 then return 0 end
+    return PC:SellExact(list) and n or 0
 end
 
 -- Bags full and nothing more fits: bank first if it has room, else sell the least useful spare
@@ -615,14 +605,14 @@ function VendorAuto:MakeRoomStep(s, forName)
     elseif Sell.purge or Sell.purgeMats then
         -- a purge you said yes to is running: nothing else is offered on top of it
         s.text = "Purging: go and sell"
-        tip[#tip + 1] = "The purge you chose is under way: the AH and vendor tasks sell them."
+        tip[#tip + 1] = "The purge you chose is under way: the Auction House and vendor tasks sell them."
     elseif #Sell:PurgeList() > 0 and not (PC.cdb.purgeAskSkip and time() - PC.cdb.purgeAskSkip < 3600) then
         -- bags and bank full and the plan can't go on: a suggestion, never automatic
         s.text = "Bags full: purge crafted items?"
         s.run = function() Sell:AskPurge() end
         s.skip = function() PC.cdb.purgeAskSkip = time(); PC:RefreshUI() end
         s.skipTip = "Not now: I'll ask again in an hour."
-        tip[#tip + 1] = "Your bags and bank are full, so the plan can't go on. Suggestion: purge your crafted items - each sells wherever pays more (AH or vendor), even below cost. You confirm first."
+        tip[#tip + 1] = "Your bags and bank are full, so the plan can't go on. Suggestion: purge your crafted items - each sells wherever pays more (auction or vendor), even below cost. You confirm first."
     elseif false then
         -- (never suggested any more: selling materials to a vendor loses what you paid for them -
         -- the Purge materials button on the Sell page is still there if you want it)
@@ -642,47 +632,13 @@ function VendorAuto:MakeRoomStep(s, forName)
     return s
 end
 
--- Sells those leftovers to the open vendor (whole stacks first, the remainder of a stack is split off)
+-- Sells those leftovers to the open vendor: exactly what's left over (a stack is split if it has to be)
 function VendorAuto:SellBack(entries)
     if not PC.merchantOpen then return 0 end
-    local want = {}
-    for _, lo in ipairs(self:Leftovers(entries)) do want[lo.id] = lo.n end
-    local slots = Bags()
-    table.sort(slots, function(a, b) return a.n > b.n end)
-    local sold, value = 0, 0
-    local function emptySlot()
-        local C, numSlots = C_Container, (C_Container and C_Container.GetContainerNumSlots) or GetContainerNumSlots
-        local full = {}
-        for _, s in ipairs(Bags()) do full[s.bag * 100 + s.slot] = true end
-        for _, bag in ipairs(PC:PlayerBags()) do
-            for slot = 1, (numSlots and numSlots(bag) or 0) do
-                if not full[bag * 100 + slot] then return bag, slot end
-            end
-        end
-    end
-    for _, s in ipairs(slots) do
-        local n = want[s.id]
-        if n and n > 0 and not s.locked then
-            if s.n <= n then
-                UseBagItem(s.bag, s.slot)
-                want[s.id] = n - s.n; sold = sold + s.n
-            else
-                -- split just the surplus into an empty slot, then sell that stack
-                local split = (C_Container and C_Container.SplitContainerItem) or SplitContainerItem
-                local pick = (C_Container and C_Container.PickupContainerItem) or PickupContainerItem
-                local eb, es = emptySlot()
-                if split and pick and eb then
-                    split(s.bag, s.slot, n)
-                    pick(eb, es)
-                    C_Timer.After(0.3, function() if PC.merchantOpen then UseBagItem(eb, es) end end)
-                    want[s.id] = 0; sold = sold + n
-                end
-            end
-            value = value + (PC.SellPrice and PC:SellPrice(s.id) or 0) * (n - (want[s.id] or 0))
-        end
-    end
-    if sold > 0 then PC.Buy:Say(("|cff40ff40Sold back %d leftover material%s for %s.|r"):format(sold, sold == 1 and "" or "s", PC:Money(value, false, true))) end
-    return sold
+    local list, n = {}, 0
+    for _, lo in ipairs(self:Leftovers(entries)) do list[#list + 1] = { id = lo.id, n = lo.n }; n = n + lo.n end
+    if n == 0 then return 0 end
+    return PC:SellExact(list) and n or 0
 end
 
 -- Tools the plan's recipes need that you don't have: { id, name }
@@ -700,112 +656,166 @@ function VendorAuto:MissingTools()
     return out
 end
 
+-- Buy from the open vendor (id and qty: one item; no id: everything the plan needs here), then
+-- done(summary) once those purchases are finished. VendorBuy calls back with { bought = { {id, name,
+-- qty, spent} }, failed = { {id, name, want, got, why} } }; an older one that doesn't is watched until
+-- its queue has emptied, and what arrived is counted from your bags.
+VendorAuto.BUY_WAIT = 60 -- seconds, at most, before selling starts anyway
+function VendorAuto:BuyThen(id, qty, done)
+    local VB = PC.VendorBuy
+    local want, before = {}, {}
+    if id then want[id] = qty else for _, it in ipairs(VB:PlanList()) do want[it.id] = it.qty end end
+    for wid in pairs(want) do before[wid] = PC:BagCount(wid) end
+    local over, idle = false, 0
+    local function finish(summary)
+        if over then return end
+        over = true
+        if type(summary) ~= "table" then
+            summary = { bought = {}, failed = {} }
+            for wid, n in pairs(want) do
+                local got, name = math.max(PC:BagCount(wid) - before[wid], 0), PC:ItemName(wid) or ("item " .. wid)
+                if got > 0 then table.insert(summary.bought, { id = wid, name = name, qty = got }) end
+                if got < n then table.insert(summary.failed, { id = wid, name = name, want = n, got = got, why = "not bought" }) end
+            end
+        end
+        done(summary)
+    end
+    local function cb(summary) Safe("vendor", finish, summary or false) end
+    local ok
+    if id then ok = Safe("vendor", VB.Buy, VB, id, qty, true, cb) else ok = Safe("vendor", VB.BuyAll, VB, true, cb) end
+    if not ok then return finish() end
+    local t0 = GetTime()
+    local function watch()
+        if over then return end
+        local busy = (VB.Busy and VB:Busy()) or VB.pumping or (VB.queue and #VB.queue > 0)
+        if busy then idle = 0 else idle = idle + 1 end
+        if idle >= 2 or not PC.merchantOpen or GetTime() - t0 > self.BUY_WAIT then return finish() end
+        C_Timer.After(0.5, function() Safe("vendor", watch) end)
+    end
+    C_Timer.After(0.5, function() Safe("vendor", watch) end)
+end
+
+local SOLD_WORDS = { junk = "junk", flip = "vendor flip", mat = "spare material", leftover = "leftover" }
+
+-- At a vendor: 1) buy what the plan needs here (missing tools first, one of each), and once that has
+-- arrived 2) sell junk, vendor flips, extras you chose to vendor, spare materials (Purge materials)
+-- and 3) the plan's leftover vendor materials, all in one exact sale. One note at the end.
 function VendorAuto:Run()
-    local lines = {}
-    if Sell.purgeMats then Sell:SellMats() end
-    -- 1) buy what the plan needs from this vendor (missing tools first: one of each)
-    if On("autoVendorBuy", true) and PC.VendorBuy:Open() then
-        local bought = {}
+    local visit = {}
+    self.visit = visit -- (the vendor opened again: the new visit takes over)
+    local VB = PC.VendorBuy
+    local lines, boughtAny, noted = {}, false, false
+    local function live() return self.visit == visit and PC.merchantOpen end
+    local function note()
+        if noted then return end
+        noted = true
+        if #lines > 0 then PC:Note("At the vendor", lines) end
+    end
+    local buys = {}
+    if On("autoVendorBuy", true) and VB and VB:Open() then
         for _, t in ipairs(self:MissingTools()) do
-            if PC.VendorBuy:Sells(t.id) and not bought[t.id] then
-                bought[t.id] = true
-                if PC.VendorBuy:Buy(t.id, 1, true) > 0 then lines[#lines + 1] = "Bought a " .. t.name .. " (a tool your plan needs)" end
-            end
+            if VB:Sells(t.id) then buys[#buys + 1] = { id = t.id, qty = 1, tool = t.name } end
         end
+        buys[#buys + 1] = {} -- then everything the plan needs from this vendor
     end
-    if On("autoVendorBuy", true) and PC.VendorBuy:Open() then
-        local list = PC.VendorBuy:PlanList()
-        if #list > 0 then
-            local before = GetMoney()
-            PC.VendorBuy:BuyAll()
-            local spent = before - GetMoney()
-            local names = {}
-            for _, it in ipairs(list) do names[#names + 1] = it.qty .. " " .. (it.name or "") end
-            if spent > 0 or (PC.Buy:Message() or ""):find("Bought") then
-                lines[#lines + 1] = "Bought for your plan: " .. table.concat(names, ", ")
-            else
-                lines[#lines + 1] = "|cffff8040" .. (PC.Buy:Message() or "Didn't buy plan materials.") .. "|r"
-            end
-        end
-    end
-    -- 2) sell junk and (optionally) vendor flips
-    local junk, flips, value = 0, 0, 0
-    local toSell = {}
-    -- vendor flips: only what's above your Keep number, whole stacks, smallest first
-    local flipLeft = {}
-    if On("autoFlips", true) then
-        for _, it in ipairs(Sell:Items()) do
-            -- never for less than it cost you (only Purge crafted items sells at a loss)
-            local each = Sell:CostEach(it.id)
-            local loss = each and (PC:SellPrice(it.id) or 0) < each and not Sell.purge
-            if it.vendor and it.sellN > 0 and not loss then flipLeft[it.id] = it.sellN end
-        end
-    end
-    -- extras you chose to vendor (too many for the AH, no room to keep them)
-    for id, n in pairs(PC.cdb.dumpVendor or {}) do flipLeft[id] = (flipLeft[id] or 0) + n end
-    local flipSold = {} -- what each item brought in, to show it against what it cost
-    local slots = Bags()
-    table.sort(slots, function(a, b) return a.n < b.n end)
-    for _, s in ipairs(slots) do
-        if not s.locked and not s.noValue then
-            local price = PC.SellPrice and PC:SellPrice(s.id)
-            if price and price > 0 then
-                if On("autoJunk", true) and s.quality == 0 then
-                    toSell[#toSell + 1] = s; junk = junk + 1; value = value + price * s.n
-                elseif flipLeft[s.id] and flipLeft[s.id] >= s.n then
-                    flipLeft[s.id] = flipLeft[s.id] - s.n
-                    toSell[#toSell + 1] = s; flips = flips + 1; value = value + price * s.n
-                    flipSold[s.id] = flipSold[s.id] or { n = 0, gold = 0 }
-                    flipSold[s.id].n = flipSold[s.id].n + s.n; flipSold[s.id].gold = flipSold[s.id].gold + price * s.n
+    local sellAll
+    local function nextBuy()
+        if not live() then return note() end
+        local b = table.remove(buys, 1)
+        if not b then return sellAll() end
+        if not b.id and #VB:PlanList() == 0 then return nextBuy() end
+        self:BuyThen(b.id, b.qty, function(sum)
+            local got, spent = {}, 0
+            for _, x in ipairs(sum.bought or {}) do
+                local n = x.qty or x[3] or 0
+                if n > 0 then
+                    boughtAny = true
+                    got[#got + 1] = n .. " " .. (x.name or x[2] or PC:ItemName(x.id or x[1]) or "")
+                    spent = spent + (x.spent or x[4] or 0)
                 end
             end
-        end
-    end
-    local i = 0
-    local function sellNext()
-        i = i + 1
-        local s = toSell[i]
-        if not s or not PC.merchantOpen then return end
-        UseBagItem(s.bag, s.slot)
-        PC:PlanMadeUsed(s.id, s.n)
-        C_Timer.After(0.15, sellNext)
-    end
-    PC.cdb.dumpVendor = nil -- the extras you chose to vendor are in this sale
-    if #toSell > 0 then
-        sellNext()
-        local parts = {}
-        if junk > 0 then parts[#parts + 1] = junk .. " junk" end
-        if flips > 0 then parts[#parts + 1] = flips .. " vendor flip" .. (flips == 1 and "" or "s") end
-        lines[#lines + 1] = ("Sold %s · +%s"):format(table.concat(parts, " and "), PC:Money(value))
-        -- each crafted item sold: what it brought in against what it cost you
-        for id, f in pairs(flipSold) do
-            local each = Sell:CostEach(id)
-            local line = ("%d %s: %s"):format(f.n, PC:ItemName(id) or ("item " .. id), PC:Money(f.gold))
-            if each then
-                local diff = f.gold - each * f.n
-                line = line .. (" (cost %s: %s%s)"):format(PC:Money(each * f.n), diff >= 0 and "|cff40ff40+" or "|cffff4040-",
-                    PC:Money(math.abs(diff)) .. "|r")
+            if b.tool then
+                if #got > 0 then lines[#lines + 1] = "Bought a " .. b.tool .. " for your plan" end
+            elseif #got > 0 then
+                lines[#lines + 1] = "Bought for your plan: " .. table.concat(got, ", ") .. (spent > 0 and (" · " .. PC:Money(spent)) or "")
             end
-            lines[#lines + 1] = line
-            PC:Print(line)
-        end
+            for _, f in ipairs(sum.failed or {}) do
+                local n = (f.want or f[3] or 0) - (f.got or f[4] or 0)
+                if n > 0 then lines[#lines + 1] = ("|cffff8040Couldn't buy %d %s: %s|r"):format(n, f.name or f[2] or "", f.why or f[5] or "not bought") end
+            end
+            if not b.tool and #got == 0 and #(sum.failed or {}) == 0 then
+                lines[#lines + 1] = "|cffff8040" .. (PC.Buy:Message() or "Didn't buy plan materials.") .. "|r"
+            end
+            nextBuy()
+        end)
     end
-    -- 3) plan crafted: sell back the cheap vendor materials that are left over
-    local boughtNow = #lines > 0 and (lines[1] or ""):find("^Bought")
-    if PC:SellLeftovers() and PC.Next and not boughtNow then
-        local pending = false
-        for _, e in ipairs(PC.UI and PC.UI:PlanEntries() or {}) do if PC.Craft:Count(e) > 0 then pending = true break end end
-        if not pending then
-            local lo = self:Leftovers()
-            if #lo > 0 then
-                local names, v = {}, 0
-                for _, it in ipairs(lo) do names[#names + 1] = it.n .. " " .. it.name; v = v + it.value end
-                C_Timer.After(0.5, function() Safe("sell back", self.SellBack, self) end)
-                lines[#lines + 1] = ("Selling back leftovers: %s · +%s"):format(table.concat(names, ", "), PC:Money(v))
+    sellAll = function()
+        if not live() then return note() end
+        -- a sale you started yourself is still going: this one waits its turn, then looks again
+        if PC.selling then return C_Timer.After(0.5, function() Safe("vendor", sellAll) end) end
+        local want, kind, order = {}, {}, {}
+        local function add(id, n, k)
+            if not id or (n or 0) <= 0 then return end
+            if not want[id] then order[#order + 1] = id; kind[id] = k end
+            want[id] = math.max(want[id] or 0, n) -- (the same things on two lists are still the same things)
+        end
+        -- junk: unless the Scrap add-on is there (it sells your junk: one job, one owner)
+        if On("autoJunk", true) and not PC.AddOnLoaded("Scrap") then
+            local junk = {}
+            for _, s in ipairs(Bags()) do
+                if s.quality == 0 and not s.noValue and not s.locked and (PC:SellPrice(s.id) or 0) > 0 then junk[s.id] = (junk[s.id] or 0) + s.n end
+            end
+            for id, n in pairs(junk) do add(id, n, "junk") end
+        end
+        -- vendor flips: only what's above your Keep number, never for less than it cost you (only
+        -- Purge crafted items sells at a loss)
+        if On("autoFlips", true) then
+            for _, it in ipairs(Sell:Items()) do
+                local each = Sell:CostEach(it.id)
+                local loss = each and (PC:SellPrice(it.id) or 0) < each and not Sell.purge
+                if it.vendor and it.sellN > 0 and not loss then add(it.id, it.sellN, "flip") end
             end
         end
+        -- extras you chose to vendor (too many for the AH, no room to keep them)
+        for id, n in pairs(PC.cdb.dumpVendor or {}) do add(id, n, "flip") end
+        PC.cdb.dumpVendor = nil
+        if Sell.purgeMats then for _, it in ipairs(Sell:PurgeMatsList()) do add(it.id, it.n, "mat") end end
+        -- the plan's crafting is done: the cheap vendor materials left over go back
+        if PC:SellLeftovers() and PC.Next and not boughtAny then
+            local pending = false
+            for _, e in ipairs(PC.UI and PC.UI:PlanEntries() or {}) do if PC.Craft:Count(e) > 0 then pending = true break end end
+            if not pending then for _, lo in ipairs(self:Leftovers()) do add(lo.id, lo.n, "leftover") end end
+        end
+        if #order == 0 then
+            Sell.purgeMats = nil -- (nothing spare left to sell)
+            return note()
+        end
+        local list = {}
+        for _, id in ipairs(order) do list[#list + 1] = { id = id, n = want[id] } end
+        PC:SellExact(list, function(res)
+            if not res.stopped then Sell.purgeMats = nil end
+            local count, parts = {}, {}
+            for _, s in ipairs(res.sold) do count[kind[s.id]] = (count[kind[s.id]] or 0) + s.n end
+            for _, k in ipairs({ "junk", "flip", "mat", "leftover" }) do
+                local n = count[k]
+                if n then parts[#parts + 1] = n .. " " .. SOLD_WORDS[k] .. ((n == 1 or k == "junk") and "" or "s") end
+            end
+            if #parts > 0 then lines[#lines + 1] = ("Sold %s · +%s"):format(table.concat(parts, ", "), PC:Money(res.gold)) end
+            -- each crafted item sold: what it brought in, and the profit either way
+            for _, s in ipairs(res.sold) do
+                if kind[s.id] == "flip" then
+                    lines[#lines + 1] = ("%d %s: %s (%s)"):format(s.n, s.name, PC:Money(s.gold), Sell:ProfitText(Sell:Profits(s.id, s.n, s.gold)))
+                end
+            end
+            for _, s in ipairs(res.short) do
+                if kind[s.id] ~= "junk" then -- (junk another addon sold first isn't news)
+                    lines[#lines + 1] = ("|cffff8040%d %s not sold: %s.|r"):format(s.want - s.got, s.name, s.why)
+                end
+            end
+            note()
+        end, true)
     end
-    if #lines > 0 then PC:Note("At the vendor", lines) end
+    nextBuy()
 end
 
 ---------------------------------------------------------------------------

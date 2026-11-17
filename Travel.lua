@@ -46,6 +46,8 @@ function Travel:World(map, x, y)
     return cont, wx, wy
 end
 
+local NONE = {}
+
 -- a point: { map, x, y } (a place or a spot); world position cached on it
 local function W(pt)
     if not pt then return nil end
@@ -153,8 +155,8 @@ function Travel:HearthSpot()
     local a = PC.cdb and PC.cdb.hearthArrive
     if a and (not bind or a.bind == bind) then return a, bind end
     if bind then
-        for _, p in pairs(Places:All()) do
-            if p.kind == "inn" and (p.sub == bind or p.zone == bind) then return p, bind end
+        for _, p in ipairs(Places:OfKind("inn")) do
+            if p.sub == bind or p.zone == bind then return p, bind end
         end
     end
     return nil, bind
@@ -167,8 +169,8 @@ function Travel:TeleportSpot(id)
     local city = self.TELEPORTS[id]
     if not city then return nil end
     for _, kind in ipairs({ "ah", "bank", "mail", "inn", "flight" }) do
-        for _, p in pairs(Places:All()) do
-            if p.kind == kind and (p.zone == city or (p.zone or ""):find(city, 1, true)) then return p end
+        for _, p in ipairs(Places:OfKind(kind)) do
+            if p.zone == city or (p.zone or ""):find(city, 1, true) then return p end
         end
     end
     -- nothing known there yet: the middle of the city (learned for real the first time you use it)
@@ -389,14 +391,21 @@ function Travel:RuinsEntrance()
     end
     local found
     if Places.MNBEach then
-        Places:MNBEach("cross", function(_, p)
-            if found or type(p) ~= "table" then return end
-            local m, to = tonumber(p.m), tonumber(p.to)
-            local x, y, x2, y2 = tonumber(p.x), tonumber(p.y), tonumber(p.x2), tonumber(p.y2)
-            if not (x and y and x2 and y2) then return end
-            if m == 1420 and to == 1458 then found = { tx = x, ty = y, ux = x2, uy = y2, from = "shared" }
-            elseif m == 1458 and to == 1420 then found = { tx = x2, ty = y2, ux = x, uy = y, from = "shared" } end
-        end)
+        -- (thousands of shared places: looked through again only when they change, not for every route)
+        local c = self.ruinsShared
+        if c and Places.mnbListening and c.rev == Places.mnbRev then
+            found = c.found
+        else
+            Places:MNBEach("cross", function(_, p)
+                if found or type(p) ~= "table" then return end
+                local m, to = tonumber(p.m), tonumber(p.to)
+                local x, y, x2, y2 = tonumber(p.x), tonumber(p.y), tonumber(p.x2), tonumber(p.y2)
+                if not (x and y and x2 and y2) then return end
+                if m == 1420 and to == 1458 then found = { tx = x, ty = y, ux = x2, uy = y2, from = "shared" }
+                elseif m == 1458 and to == 1420 then found = { tx = x2, ty = y2, ux = x, uy = y, from = "shared" } end
+            end)
+            self.ruinsShared = { rev = Places.mnbRev, found = found }
+        end
     end
     return found or self.RUINS_GATE
 end
@@ -468,16 +477,29 @@ end
 -- area), flying (to a flight path you know), boats and portals, and from where you stand only, your
 -- hearthstone and teleports.
 ---------------------------------------------------------------------------
-function Travel:Graph(start, stops)
-    local g = { nodes = { start }, fp = {}, links = {}, start = 1, stops = {}, side = {} }
+-- The part of the graph that doesn't depend on where you are or where you're going (flight masters, docks
+-- and boats, the roads between zones, the Ruins entrance) is made once and kept until any of it changes.
+-- Making it was half of every route, and its spots were new each time, so where each one is in the world
+-- was asked of the game again for every route. The same spots, in the same order as before.
+function Travel:StaticGraph()
+    local fpList = self:FlightNodes()
+    local all = Places:All()
+    local exits = Places.AllExits and Places:AllExits() or {}
+    local tl = self:TransportLinks()
+    local ruins = self:RuinsEntrance()
+    local rx, ry, ux, uy = ruins and ruins.tx, ruins and ruins.ty, ruins and ruins.ux, ruins and ruins.uy
+    local c = self.staticGraph
+    if c and c.fpList == fpList and c.all == all and c.placesRev == Places.rev and c.exits == exits
+        and c.exitsRev == Places.exitsRev and c.tl == tl and c.rx == rx and c.ry == ry and c.ux == ux and c.uy == uy then
+        return c
+    end
+    local g = { nodes = {}, fp = {}, links = {} }
     local function add(pt) g.nodes[#g.nodes + 1] = pt; return #g.nodes end
-    start.side = start.side or self:SideHere(start.map)
-    for k, st in ipairs(stops or {}) do g.stops[k] = add(st) end
-    for _, p in ipairs(self:FlightNodes()) do
+    for _, p in ipairs(fpList) do
         local i = add(p)
         g.fp[i] = self:IsKnownFP(p) and "known" or "new"
     end
-    for _, p in pairs(Places:All()) do
+    for _, p in pairs(all) do
         if p.kind == "link" and p.tomap and not self:CityPair(p.map, p.tomap) then
             p.toPt = p.toPt or { map = p.tomap, x = p.tox, y = p.toy, zone = p.tozone, name = p.tozone or "the other side" }
             local secs = p.secs or 10
@@ -503,7 +525,7 @@ function Travel:Graph(start, stops)
             end
         end
     end
-    for _, l in ipairs(self:TransportLinks()) do
+    for _, l in ipairs(tl) do
         g.links[#g.links + 1] = { from = add(l.from), to = add(l.to), secs = l.secs + self.BOAT_WAIT, how = l.how,
             text = ("Take the %s to %s"):format(l.how, l.to.zone or "the other side") }
     end
@@ -512,7 +534,7 @@ function Travel:Graph(start, stops)
     g.roads, g.roadZones = {}, {}
     local pairSeen = {}
     local zm = PC.ToLearn and PC.ToLearn.ZoneMap
-    for m, list in pairs(Places.AllExits and Places:AllExits() or {}) do
+    for m, list in pairs(exits) do
         local best = {}
         for _, e in ipairs(list) do
             if not self:CityPair(m, e.to) then
@@ -536,13 +558,36 @@ function Travel:Graph(start, stops)
         end
     end
     -- the Ruins entrance: outside (Tirisfal) and the Ruins (on top of Undercity), both ways
-    local ruins = self:RuinsEntrance()
     if ruins then
         local o = add({ kind = "ruins", ruins = "in", map = 1420, x = ruins.tx, y = ruins.ty, side = "out", name = "the Ruins of Lordaeron" })
         local t = add({ kind = "ruins", ruins = "out", map = 1458, x = ruins.ux, y = ruins.uy, side = "uctop", name = "the Ruins of Lordaeron" })
         g.links[#g.links + 1] = { from = o, to = t, secs = 3, how = "ruins" }
         g.links[#g.links + 1] = { from = t, to = o, secs = 3, how = "ruins" }
     end
+    g.side = {}
+    for i, nd in ipairs(g.nodes) do g.side[i] = self:SideOf(nd) end
+    g.ruins = ruins and true or false
+    g.fpList, g.all, g.placesRev, g.exits, g.exitsRev, g.tl = fpList, all, Places.rev, exits, Places.exitsRev, tl
+    g.rx, g.ry, g.ux, g.uy = rx, ry, ux, uy
+    self.staticGraph = g
+    return g
+end
+
+function Travel:Graph(start, stops)
+    local g = { nodes = { start }, fp = {}, links = {}, start = 1, stops = {}, side = {} }
+    local function add(pt) g.nodes[#g.nodes + 1] = pt; return #g.nodes end
+    start.side = start.side or self:SideHere(start.map)
+    for k, st in ipairs(stops or {}) do g.stops[k] = add(st) end
+    -- the fixed part (see StaticGraph), after you and your stops
+    local sg = self:StaticGraph()
+    local base, ns = #g.nodes, #sg.nodes
+    for i = 1, ns do g.nodes[base + i] = sg.nodes[i] end
+    for i, kind in pairs(sg.fp) do g.fp[base + i] = kind end
+    for _, l in ipairs(sg.links) do
+        g.links[#g.links + 1] = { from = base + l.from, to = base + l.to, secs = l.secs, how = l.how, text = l.text }
+    end
+    g.roads, g.roadZones = sg.roads, sg.roadZones
+    local ruins = sg.ruins
     -- the elevators, both ways: the inside end and the outside end are the same spot on the map
     for _, ec in ipairs({ 1458, 1456 }) do
         local spots = {}
@@ -584,20 +629,34 @@ function Travel:Graph(start, stops)
     g.out = {}
     for _, l in ipairs(g.links) do g.out[l.from] = g.out[l.from] or {}; table.insert(g.out[l.from], l) end
     -- hearthstone and your own teleports: where they land (used only from where you stand right now)
+    -- (never to the zone you're in: across it you walk, however far, and the cooldown is kept)
     g.jumps = {}
-    if PC:RouteOn() then
+    local function away(spot)
+        if not spot then return false end
+        if spot.map and start.map and spot.map == start.map then return false end
+        if spot.zone and spot.zone ~= "" and start.zone and spot.zone == start.zone then return false end
+        return true
+    end
+    -- a stop in the zone you're in: walked to, never reached by jumping out and walking back
+    local home = false
+    for _, st in ipairs(stops or {}) do if st and not away(st) then home = true break end end
+    if PC:RouteOn() and not home then
         if self:HearthReady() then
             local spot, bind = self:HearthSpot()
-            if spot then g.jumps[#g.jumps + 1] = { j = add(spot), secs = self.CAST + 5, how = "hearth", text = bind } end
+            if away(spot) then g.jumps[#g.jumps + 1] = { j = add(spot), secs = self.CAST + 5, how = "hearth", text = bind } end
         end
         for id in pairs(self.TELEPORTS) do
             if SpellReady(id) then
                 local spot = self:TeleportSpot(id)
-                if spot then g.jumps[#g.jumps + 1] = { j = add(spot), secs = self.CAST + 5, how = "teleport", text = SpellName(id) } end
+                if away(spot) then g.jumps[#g.jumps + 1] = { j = add(spot), secs = self.CAST + 5, how = "teleport", text = SpellName(id) } end
             end
         end
     end
-    for i, nd in ipairs(g.nodes) do g.side[i] = (i == 1) and start.side or self:SideOf(nd) end
+    for i, nd in ipairs(g.nodes) do
+        if i == 1 then g.side[i] = start.side
+        elseif i > base and i <= base + ns then g.side[i] = sg.side[i - base]
+        else g.side[i] = self:SideOf(nd) end
+    end
     -- the stops' zones are never "too dangerous" (you're going there)
     g.safe = {}
     return g
@@ -642,20 +701,80 @@ function Travel:Dijkstra(g, src, fromHere, want)
     local nodes, speed = g.nodes, self:Speed()
     local n = #nodes
     local wc, wx, wy, zone = g._wc, g._wx, g._wy, g._zone
+    local byCont, byMap, byMapNoPos = g._byCont, g._byMap, g._byMapNoPos
     if not wc or g._n ~= n then
         wc, wx, wy, zone = {}, {}, {}, {}
+        -- the spots each spot can have a distance to (nothing else is ever a walk or a flight): the same
+        -- continent, or the same map where the game gives no world position. Only those are looked at.
+        byCont, byMap, byMapNoPos = {}, {}, {}
         for i = 1, n do
-            local c, x, y = W(nodes[i])
+            local nd = nodes[i]
+            local c, x, y = W(nd)
             wc[i], wx[i], wy[i] = c or false, x, y
-            zone[i] = self:ZoneOfNode(nodes[i]) or false
+            zone[i] = self:ZoneOfNode(nd) or false
+            local m = nd.map
+            if c then
+                local l = byCont[c]
+                if not l then l = {}; byCont[c] = l end
+                l[#l + 1] = i
+            elseif m then
+                local l = byMapNoPos[m]
+                if not l then l = {}; byMapNoPos[m] = l end
+                l[#l + 1] = i
+            end
+            if m then
+                local l = byMap[m]
+                if not l then l = {}; byMap[m] = l end
+                l[#l + 1] = i
+            end
         end
         g._wc, g._wx, g._wy, g._zone, g._n = wc, wx, wy, zone, n
+        g._byCont, g._byMap, g._byMapNoPos = byCont, byMap, byMapNoPos
         g._roadPair = {}
     end
     local dist, prev, done = { [src] = 0 }, {}, {}
+    -- the spots still to settle, nearest first (a small heap: picking the nearest used to mean a look
+    -- through every spot reached so far, for every spot settled); equally near: the lower number first
+    local hd, hj, hn = {}, {}, 0
+    local function push(d, j)
+        hn = hn + 1
+        local i = hn
+        while i > 1 do
+            local p = (i - i % 2) / 2
+            local pd, pj = hd[p], hj[p]
+            if pd < d or (pd == d and pj < j) then break end
+            hd[i], hj[i] = pd, pj
+            i = p
+        end
+        hd[i], hj[i] = d, j
+    end
+    local function pop()
+        if hn == 0 then return nil end
+        local tj, td = hj[1], hd[1]
+        local ld, lj = hd[hn], hj[hn]
+        hd[hn], hj[hn] = nil, nil
+        hn = hn - 1
+        if hn > 0 then
+            local i = 1
+            while true do
+                local c = i * 2
+                if c > hn then break end
+                if c < hn and (hd[c + 1] < hd[c] or (hd[c + 1] == hd[c] and hj[c + 1] < hj[c])) then c = c + 1 end
+                if ld < hd[c] or (ld == hd[c] and lj < hj[c]) then break end
+                hd[i], hj[i] = hd[c], hj[c]
+                i = c
+            end
+            hd[i], hj[i] = ld, lj
+        end
+        return tj, td
+    end
+    push(0, src)
     local function relax(u, j, secs, how, text)
         local nd = dist[u] + secs
-        if not dist[j] or nd < dist[j] - 0.01 then dist[j], prev[j] = nd, { from = u, how = how, text = text } end
+        if not dist[j] or nd < dist[j] - 0.01 then
+            dist[j], prev[j] = nd, { from = u, how = how, text = text }
+            push(nd, j)
+        end
     end
     if fromHere then for _, x in ipairs(g.jumps or {}) do relax(src, x.j, x.secs, x.how, x.text) end end
     local safe = { [zone[src] or 0] = true }
@@ -677,9 +796,9 @@ function Travel:Dijkstra(g, src, fromHere, want)
     local sides, fp, strict, roadZones = g.side, g.fp, g.strict, g.roadZones
     local BEND, CROSS, DANGER, FP_STOP, FLY = self.BEND, self.CROSS_PENALTY, self.DANGER_PENALTY, self.FP_STOP, self.FLY_SPEED
     local sqrt = math.sqrt
-    for _ = 1, n do
-        local u, best
-        for i, d in pairs(dist) do if not done[i] and (not best or d < best) then u, best = i, d end end
+    while true do
+        local u, du = pop()
+        while u and (done[u] or du ~= dist[u]) do u, du = pop() end -- (older, longer ways since bettered: passed over)
         if not u then break end
         done[u] = true
         if want and u == want then break end -- the way to the stop is settled: nothing further is needed
@@ -691,51 +810,58 @@ function Travel:Dijkstra(g, src, fromHere, want)
             local fpu = fp[u]
             local cu, xu, yu = wc[u], wx[u], wy[u]
             local za = zone[u] or nil
-            for j = 1, n do
-                if j ~= u and not done[j] then
-                    -- walking only between spots in the same area (inside / outside / the Ruins); a
-                    -- flight only between flight masters: anything else isn't worth measuring
-                    local sameSide = side == sides[j]
-                    local canFly = fpu and fp[j] == "known"
-                    if sameSide or canFly then
-                        local b = nodes[j]
-                        local y
-                        local cj = wc[j]
-                        if cu and cj then
-                            if cu == cj then local dx, dy = xu - wx[j], yu - wy[j]; y = sqrt(dx * dx + dy * dy) end
-                        else
-                            y = self:Yards(a, b)
-                        end
-                        if y then
-                            if sameSide then
-                                local walk = y * BEND / speed
-                                local zb = zone[j] or nil
-                                -- two zones joined by a known road: by the road, never straight over the hills
-                                local offRoad = za and zb and za ~= zb and road(za, zb)
-                                -- by roads first: zones that both have known roads are only crossed by road
-                                if not offRoad and strict and za and zb and za ~= zb and roadZones and roadZones[za] and roadZones[zb] then
-                                    offRoad = true
-                                end
-                                if offRoad then walk = nil
-                                elseif (za and zb and za ~= zb) or ((not za or not zb) and a.map ~= b.map and not self:CityPair(a.map, b.map)) then
-                                    walk = walk * CROSS
-                                end
-                                if walk and ((za and danger(za)) or (zb and danger(zb))) then
-                                    walk = walk * DANGER
-                                end
-                                if walk then relax(u, j, walk, "walk") end
+            local list1, list2
+            if cu then list1, list2 = byCont[cu], a.map and byMapNoPos[a.map]
+            else list1 = a.map and byMap[a.map] end
+            for pass = 1, 2 do
+                local list = (pass == 1 and list1 or list2) or NONE
+                for k = 1, #list do
+                    local j = list[k]
+                    if j ~= u and not done[j] then
+                        -- walking only between spots in the same area (inside / outside / the Ruins); a
+                        -- flight only between flight masters: anything else isn't worth measuring
+                        local sameSide = side == sides[j]
+                        local canFly = fpu and fp[j] == "known"
+                        if sameSide or canFly then
+                            local b = nodes[j]
+                            local y
+                            local cj = wc[j]
+                            if cu and cj then
+                                if cu == cj then local dx, dy = xu - wx[j], yu - wy[j]; y = sqrt(dx * dx + dy * dy) end
+                            else
+                                y = self:Yards(a, b)
                             end
-                            -- a flight: from any flight master of yours (one you walk up to is learned on the
-                            -- spot) to one you already know
-                            if canFly and y > 300 then
-                                relax(u, j, FP_STOP + y * BEND / FLY, "fly")
+                            if y then
+                                if sameSide then
+                                    local walk = y * BEND / speed
+                                    local zb = zone[j] or nil
+                                    -- two zones joined by a known road: by the road, never straight over the hills
+                                    local offRoad = za and zb and za ~= zb and road(za, zb)
+                                    -- by roads first: zones that both have known roads are only crossed by road
+                                    if not offRoad and strict and za and zb and za ~= zb and roadZones and roadZones[za] and roadZones[zb] then
+                                        offRoad = true
+                                    end
+                                    if offRoad then walk = nil
+                                    elseif (za and zb and za ~= zb) or ((not za or not zb) and a.map ~= b.map and not self:CityPair(a.map, b.map)) then
+                                        walk = walk * CROSS
+                                    end
+                                    if walk and ((za and danger(za)) or (zb and danger(zb))) then
+                                        walk = walk * DANGER
+                                    end
+                                    if walk then relax(u, j, walk, "walk") end
+                                end
+                                -- a flight: from any flight master of yours (one you walk up to is learned on the
+                                -- spot) to one you already know
+                                if canFly and y > 300 then
+                                    relax(u, j, FP_STOP + y * BEND / FLY, "fly")
+                                end
                             end
                         end
                     end
                 end
             end
         end
-        for _, l in ipairs(g.out[u] or {}) do relax(u, l.to, l.secs, l.how, l.text) end
+        for _, l in ipairs(g.out[u] or NONE) do relax(u, l.to, l.secs, l.how, l.text) end
     end
     return dist, prev
 end
@@ -1355,6 +1481,24 @@ function Travel:WalkRefresh()
     end)
 end
 
+-- Already at a stop: talking to its NPC, its window open (the AH, the bank, a mailbox), or standing a
+-- few yards from it. No travel to it then.
+Travel.AT_YARDS = 10
+function Travel:AtPlace(p)
+    if not p then return false end
+    local kind = p.kind
+    if kind == "ah" and PC.ahOpen then return true end
+    if kind == "bank" and PC.Bank and PC.Bank.Open and PC.Bank:Open() then return true end
+    if kind == "mail" and PC.Mail and PC.Mail.Open and PC.Mail:Open() then return true end
+    if p.name and UnitExists and UnitName and UnitExists("npc") then
+        local npc = UnitName("npc")
+        if npc and not PC.IsSecret(npc) and npc == p.name then return true end
+    end
+    local here = self:Here()
+    local yd = here and self:Yards(here, p)
+    return yd ~= nil and yd <= self.AT_YARDS
+end
+
 function Travel:CheckArrived()
     if PC.inCombat then return end
     local P = PC.Places
@@ -1456,7 +1600,7 @@ function Travel:Jumped(before, after)
     p.seen, p.mine, p.confirmed = time(), true, true
     p.toPt, p.wc = nil, nil
     t[key] = p
-    Places.allPlaces = nil
+    Places:Dirty()
     if PC.Share and PC.Share.SharePlace then PC.Share:SharePlace(key, p) end
 end
 
@@ -1479,7 +1623,7 @@ function Travel:DropFakeLinks()
         end
     end
     if gone > 0 then
-        Places.allPlaces = nil
+        Places:Dirty()
         if self.wayCache then self.wayCache = nil end
     end
     return gone
@@ -1572,7 +1716,7 @@ function Travel:NoteTaxi()
             if not bestD or d < bestD then best, bestD = p, d end
         end
     end
-    if best then best.taxiName = cur end
+    if best then best.taxiName = cur; Places:Dirty() end
 end
 
 local function Plain(s) return (s or ""):lower():gsub("^the ", "") end
@@ -1663,9 +1807,8 @@ end
 -- a city = somewhere with an Auction House or bank you've used
 function Travel:IsCityMap(map)
     if not map then return false end
-    for _, p in pairs(Places:All()) do
-        if p.map == map and (p.kind == "ah" or p.kind == "bank") then return true end
-    end
+    for _, p in ipairs(Places:OfKind("ah")) do if p.map == map then return true end end
+    for _, p in ipairs(Places:OfKind("bank")) do if p.map == map then return true end end
     return false
 end
 

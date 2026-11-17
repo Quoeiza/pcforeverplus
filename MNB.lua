@@ -767,6 +767,7 @@ end
 function MNB:TrimGround()
     local n = self:GroundCount()
     if n <= MAX_CELLS then return end
+    self.groundRev = (self.groundRev or 0) + 1
     for limit = 1, 60000 do
         for _, g in pairs(self:Ground()) do
             for key, v in pairs(g) do
@@ -780,6 +781,7 @@ end
 -- another saved copy of the ground (the same pool, saved by another family addon): the bigger counts
 -- win, links join (never added up: it's the same walking saved twice)
 function MNB:MergeGround(other)
+    self.groundRev = (self.groundRev or 0) + 1
     for cont, cells in pairs(other) do
         if type(cells) == "table" then
             local g = self:Ground(cont)
@@ -796,6 +798,7 @@ end
 
 -- add to a square (and remember it for the next batch when it's yours)
 function MNB:AddCell(cont, cx, cy, walks, trouble, links, mine)
+    self.groundRev = (self.groundRev or 0) + 1
     local g = self:Ground(cont)
     local key = cx .. ":" .. cy
     local w, t, l = Unpack(g[key])
@@ -1082,9 +1085,12 @@ function MNB:GroundAim(cont, wx, wy, tx, ty)
     local idx, off
     if c and c.way then idx, off = nearest(c.way, c.i) end
     local stale = not c or (now - c.t >= 20) or (off and off > self.AIM_OFF)
+    -- standing still, same target, nothing new walked or heard: the way would come out the same
+    if stale and c and not (off and off > self.AIM_OFF) and c.wx == wx and c.wy == wy and c.tx == tx and c.ty == ty
+        and c.rev == (self.groundRev or 0) then stale = false end
     if stale and not (c and now - c.t < 3) then
         local way = self:GroundWay(cont, wx, wy, tx, ty)
-        c = { tk = tk, t = now, way = way, i = 1 }
+        c = { tk = tk, t = now, way = way, i = 1, wx = wx, wy = wy, tx = tx, ty = ty, rev = self.groundRev or 0 }
         self.aimCache = c
         idx, off = nil, nil
         if way then idx, off = nearest(way, 1) end
