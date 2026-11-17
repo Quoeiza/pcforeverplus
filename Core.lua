@@ -3838,7 +3838,7 @@ function PC:BagCount(itemID)
     return GetItemCount(itemID, false) or 0
 end
 
--- Can your gold pay for one craft's materials? Same price as the Mats column, minus materials already
+-- Can your gold pay for one craft's materials? Same price as the Materials column, minus materials already
 -- in your BAGS (bank doesn't count: you'd have to go get them). Unknown prices count as "no".
 function PC:CanAfford(entry)
     if not entry.cost then return false end

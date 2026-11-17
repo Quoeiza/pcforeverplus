@@ -2225,9 +2225,9 @@ function UI:CreateRecipesPage(p)
     HeaderStrip(lp)
     local cols = {
         { "name", "Name", nil, "The arrows show the chance of a skill-up.", text = true },
-        { "cost", "Mats", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
+        { "cost", "Materials", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
         { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing.", fit = "money" },
-        { "vendorSell", "Sells to vendor for", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
+        { "vendorSell", "Sells at vendor", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
         { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut.", fit = "money" },
         { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
         { "profitPct", "Profit %", 48, "Profit as a % of material cost, for how it's sold (auction, vendor or disenchanting).", fit = "pct" },
@@ -2311,7 +2311,7 @@ function UI:CreateRecipesPage(p)
                 local tip = { e.r.name .. "  |cff40c0ff(auction flip)|r",
                     "|cff40c0ffNot a craft:|r bought at auction and sold to any vendor for more.",
                     " ",
-                    ("Cheapest at auction: %s each |cff888888(the Mats column)|r"):format(PC:Money(e.cost)),
+                    ("Cheapest at auction: %s each |cff888888(the Materials column)|r"):format(PC:Money(e.cost)),
                     ("A vendor pays: %s each%s"):format(PC:Money(e.sell), sure and " |cff888888(confirmed)|r"
                         or " |cffff8040(not confirmed yet: sell one to a vendor to confirm it)|r"),
                     ("Vendor Profit each: %s (%d%%)"):format(PC:Money(e.vendorProfit, true), math.floor((e.vendorProfitPct or 0) + 0.5)),

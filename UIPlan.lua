@@ -514,7 +514,7 @@ function UI:CreateShoppingPage(p)
         { "name", "Recipe", nil, "The hammer opens it in your profession window.", text = true },
         { "planCount", "How many", 96, "How many crafts are planned. Type a number, or use - and +." },
         { "craftable", "Craftable at Profit", 70, "How many you can craft at a profit with your materials and gold (or spending limit), buying the rest at live listing prices. Buying stops sooner, at your minimum profit.", fit = "num" },
-        { "mats", "Mats", 84, "Cost of the materials still to buy (what you have counts first).", fit = "gold" },
+        { "mats", "Materials to buy", 84, "Cost of the materials still to buy (what you have counts first).", fit = "gold" },
         { "ahProfit", "Auction Profit", 92, "Auction Profit for all planned crafts, materials at live listing prices, after the 5% auction cut.", fit = "gold" },
         { "vendorProfit", "Vendor Profit", 92, "Vendor Profit for all planned crafts, priced the same way.", fit = "gold" },
         { "matsMode", "Materials", 110, "Cheapest or top-quality materials (recipes with quality ranks). At the profession window: craft them.", text = true },
