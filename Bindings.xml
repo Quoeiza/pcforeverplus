@@ -1,0 +1,8 @@
+<Bindings>
+	<Binding name="PROFITCRAFTER_NEXT" header="PROFITCRAFTER" category="ADDONS">
+		ProfitCrafter_NextStep()
+	</Binding>
+	<Binding name="PROFITCRAFTER_STAR" category="ADDONS">
+		ProfitCrafter_MarkStar()
+	</Binding>
+</Bindings>

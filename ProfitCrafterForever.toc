@@ -1,0 +1,38 @@
+## Interface: 16001
+## Title: ProfitCrafter Forever
+## Notes: Shows which of your known recipes make a profit on the Auction House and what materials to buy.
+## Author: MostlyNotBroken
+## IconTexture: Interface\AddOns\ProfitCrafterForever\Media\Icon
+## Version: 0.3.0
+## AddonCompartmentFunc: ProfitCrafter_OnCompartmentClick
+## SavedVariables: ProfitCrafterDB
+## SavedVariablesPerCharacter: ProfitCrafterCharDB
+
+MNB.lua
+MNBRoads.lua
+Core.lua
+RecipeDB.lua
+Share.lua
+Depth.lua
+UI.lua
+UIPlan.lua
+UIPages.lua
+News.lua
+Dock.lua
+Shop.lua
+Ticker.lua
+Places.lua
+Travel.lua
+Bank.lua
+Automation.lua
+Next.lua
+Errands.lua
+MakeGold.lua
+Steps.lua
+Learn.lua
+ToLearn.lua
+Finds.lua
+FlightLine.lua
+Synergy.lua
+Guide.lua
+Options.lua
