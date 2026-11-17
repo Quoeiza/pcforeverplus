@@ -228,8 +228,23 @@ local function SetSkillArrows(row, diff)
 end
 UI.SetSkillArrows = SetSkillArrows
 
+-- Table lettering, a little smaller than the game's own: headings, big rows and small rows
+local function TableFont(name, base, scale)
+    local src = _G[base]
+    local f = CreateFont and src and src.GetFont and CreateFont(name)
+    if not f then return base end
+    f:CopyFontObject(src)
+    local path, size, flags = src:GetFont()
+    if path and size then f:SetFont(path, size * scale, flags or "") end
+    return name
+end
+local HEAD_FONT = TableFont("ProfitCrafterTableHead", "GameFontNormalSmall", 0.92)
+local CELL_FONT = TableFont("ProfitCrafterTableCell", "GameFontHighlight", 0.9)
+local CELL_SMALL = TableFont("ProfitCrafterTableSmall", "GameFontHighlightSmall", 0.92)
+UI.CELL_FONT = CELL_FONT
+
 local function RowText(row, x, width, justify)
-    local fs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local fs = row:CreateFontString(nil, "OVERLAY", CELL_SMALL)
     fs:SetPoint("LEFT", x, 0)
     fs:SetWidth(width)
     fs:SetJustifyH(justify or "LEFT")
@@ -257,7 +272,7 @@ local function FitCell(fs, text)
     if fs.isSmall then fs:SetFontObject(fs.bigFont); fs.isSmall = false end
     local room = fs:GetWidth() or 0
     if TextWidth(fs) <= room then return end
-    fs:SetFontObject("GameFontHighlightSmall"); fs.isSmall = true
+    fs:SetFontObject(CELL_SMALL); fs.isSmall = true
     -- still too wide (a big sum): drop the copper, then the silver, rather than cut it off
     for _, part in ipairs({ COPPER_PART, SILVER_PART }) do
         if TextWidth(fs) <= room then return end
@@ -517,7 +532,7 @@ local function Header(parent, x, w, label, key, desc, tbl, first)
     b:SetPoint("TOPLEFT", x, -4)
     b:SetSize(w, HEAD_H)
     b.label, b.key, b.tbl, b.first = label, key, tbl, first
-    local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local fs = b:CreateFontString(nil, "OVERLAY", HEAD_FONT)
     fs:SetPoint("TOPRIGHT", -4, 0)
     fs:SetPoint("BOTTOMRIGHT", -4, 0)
     fs:SetWidth(math.max(w - 8 - ARROW, 8)) -- the arrow's room (and a gap) stays clear on the left
@@ -553,16 +568,54 @@ local function Header(parent, x, w, label, key, desc, tbl, first)
     return b
 end
 
--- A table's columns, left to right: { key, label, width, tooltip, text = true (A-Z first) }. The one
--- column with no width takes the room the others leave; a column with no label is just room (buttons).
--- Makes the headers, and gives every column its x and width (cols.by[key] finds one).
+-- Best fit: how wide a label is at its narrowest on two lines (broken between words)
+local measure
+local function Measure(text, font)
+    if not measure then measure = UIParent:CreateFontString(nil, "OVERLAY"); measure:Hide() end
+    measure:SetFontObject(font)
+    measure:SetText(text)
+    return math.ceil(TextWidth(measure))
+end
+local function LabelWidth(label)
+    local words = {}
+    for w in label:gmatch("%S+") do words[#words + 1] = w end
+    local best = Measure(label, HEAD_FONT)
+    for i = 1, #words - 1 do
+        best = math.min(best, math.max(Measure(table.concat(words, " ", 1, i), HEAD_FONT),
+            Measure(table.concat(words, " ", i + 1), HEAD_FONT)))
+    end
+    return best
+end
+-- the widest usual value of each kind (a bigger sum of money drops its copper: FitCell)
+local function FitSample(kind)
+    if kind == "money" then return "-" .. PC:Money(9999) end
+    if kind == "gold" then return "-" .. PC:Money(999900) end
+    return kind == "pct" and "-999%" or "99999"
+end
+
+-- A table's columns, left to right: { key, label, width, tooltip, text = true (A-Z first), fit = kind }.
+-- A column with a fit ("money", "gold", "num", "pct") is as narrow as its label on two lines and its
+-- widest usual value allow; any other keeps its width, never narrower than its label. The one column with
+-- no width takes the room the others leave; a column with no label is just room (buttons).
+-- cols.font: the rows' lettering (default: the small one). Makes the headers, and gives every column its
+-- x and width (cols.by[key] finds one).
 local function Columns(panel, cols, tbl, width)
     local used = 0
-    for _, c in ipairs(cols) do used = used + (c[3] or 0) end
+    for _, c in ipairs(cols) do
+        if c[3] and c[2] then
+            local need = LabelWidth(c[2]) + 9 + ARROW -- (the label's inset and the sort arrow's room)
+            if c.fit then
+                c.fitW = math.max(need, Measure(FitSample(c.fit), cols.font or CELL_SMALL) + 8)
+            else
+                c.fitW = math.max(need, c[3])
+            end
+        end
+        used = used + (c.fitW or c[3] or 0)
+    end
     local x, heads = 0, {}
     cols.by = {}
     for _, c in ipairs(cols) do
-        c.x, c.w = x, c[3] or ((width or RW) - used)
+        c.x, c.w = x, c.fitW or c[3] or ((width or RW) - used)
         x = x + c.w
         if c[1] then cols.by[c[1]] = c end
         if c[2] then heads[#heads + 1] = Header(panel, 4 + c.x, c.w, c[2], c[1], c[4], tbl, c.text and 1 or -1) end
@@ -873,7 +926,7 @@ local function QuickButton(parent, size)
     end)
     b:SetScript("OnEnter", function(btn)
         ShowTooltip(btn, { "Quick Buy", ("Plans as many crafts as clear your %d%% minimum profit (within your gold and bags), buys the main auction material and opens the plan. Buy the other materials there."):format(PC:MinProfitPct()),
-            "|cff888888Nothing is bought if the price no longer pays.|r" })
+            "|cff888888Nothing is bought if the item is no longer profitable.|r" })
     end)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
     return b
@@ -2172,18 +2225,19 @@ function UI:CreateRecipesPage(p)
     HeaderStrip(lp)
     local cols = {
         { "name", "Name", nil, "The arrows show the chance of a skill-up.", text = true },
-        { "cost", "Mats", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one." },
-        { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing." },
-        { "vendorSell", "Sells to vendor for", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it)." },
-        { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut." },
-        { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor." },
-        { "profitPct", "Profit %", 48, "Profit as a % of material cost, for how it's sold (auction, vendor or disenchanting)." },
-        { "listed", "Listed", 52, "How many are at auction now." },
-        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction." },
-        { "craftable", "Craftable at Profit", 64, "How many you can craft at a profit (auction or vendor) with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. The recipe's tooltip says how many clear your minimum profit, where buying stops. ~ = a material has no live listings." },
-        { "totalAH", "Total Auction Profit", 84, "Auction Profit for every craft that still profits at auction, the whole batch at live listing prices." },
-        { "totalV", "Total Vendor Profit", 84, "Vendor Profit for every craft that still profits selling to a vendor, priced the same way." },
+        { "cost", "Mats", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
+        { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing.", fit = "money" },
+        { "vendorSell", "Sells to vendor for", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
+        { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut.", fit = "money" },
+        { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
+        { "profitPct", "Profit %", 48, "Profit as a % of material cost, for how it's sold (auction, vendor or disenchanting).", fit = "pct" },
+        { "listed", "Listed", 52, "How many are at auction now.", fit = "num" },
+        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction.", fit = "num" },
+        { "craftable", "Craftable at Profit", 64, "How many you can craft at a profit (auction or vendor) with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. The recipe's tooltip says how many clear your minimum profit, where buying stops. ~ = a material has no live listings.", fit = "num" },
+        { "totalAH", "Total Auction Profit", 84, "Auction Profit for every craft that still profits at auction, the whole batch at live listing prices.", fit = "gold" },
+        { "totalV", "Total Vendor Profit", 84, "Vendor Profit for every craft that still profits selling to a vendor, priced the same way.", fit = "gold" },
     }
+    cols.font = CELL_FONT
     self.recipeCols = cols
     self.recipeHeaders = Columns(lp, cols, "recipes")
     local C = cols.by
@@ -2239,14 +2293,14 @@ function UI:CreateRecipesPage(p)
         row.quick:SetPoint("RIGHT", row.shop, "LEFT", -4, 0)
         row.quick.getEntry = function() return row.entry end
         -- larger lettering to go with the taller rows (a value too wide for it gets the small one)
-        row.name:SetFontObject("GameFontHighlight")
-        row.name.bigFont = "GameFontHighlight"
+        row.name:SetFontObject(CELL_FONT)
+        row.name.bigFont = CELL_FONT
         row.cell = {}
         for i2 = 2, #cols do
             local c = cols[i2]
             local fs = RowText(row, c.x, c.w - 4, "RIGHT")
-            fs:SetFontObject("GameFontHighlight")
-            fs.bigFont = "GameFontHighlight"
+            fs:SetFontObject(CELL_FONT)
+            fs.bigFont = CELL_FONT
             row.cell[c[1]] = fs
         end
         row:SetScript("OnEnter", function(btn)

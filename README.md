@@ -1,61 +1,125 @@
 # ProfitCrafter Forever Plus
 
-An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. Shared with the original developer for possible integration.
+An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
-The first commit is the unmodified 0.3.0 release, so `git diff` against it shows every change.
+The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
-To install, the folder must be named `ProfitCrafterForever` inside `_forever_/Interface/AddOns/`.
+To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitCrafterForever`.
 
 ## New
 
-- Auction Profit and Vendor Profit wherever a profit is shown.
-- Craftable at Profit, Total Auction Profit and Total Vendor Profit columns, the whole batch priced at live listings. Sells at auction and Sells to vendor for side by side.
-- Recipe tooltips list each ingredient and its price. The "how many?" pop-up has Max profitable.
-- Minimum profit (Settings, default 10%). Recipes below it are hidden and buying stops before a craft drops below it. The plan is then amended to match (`/pc undo` reverts it).
-- Separate Only N%+ Auction profit and Only N%+ Vendor profit boxes on the recipe tables and Scout recipes. Tick both and a recipe must meet both.
-- Every table sorts on every column.
-- Best bets and Make me gold favour what sells: an auction craft needs today's sales to be at least half its listings. Hot sellers come first, then the rest by profit potential.
-- Quick Buy (the coin on each recipe): plans the crafts that clear your minimum profit, buys the main auction material and opens the plan.
-- One-click auction buying: the price is checked and confirmed at once if it still pays (Settings).
-- Faster auction scans: 100 items a search (was 25), and listings that haven't changed are skipped.
-- Use what's in my bank (Settings, on by default). Off: the bank is ignored entirely.
-- Scout recipes read the prices of what learnable recipes make and use. Prices over 6 hours old are marked ~.
-- Craft tasks give the item count when a recipe makes several ("34 Seasoned Wolf Kabob (makes 102)").
-- Selling to a vendor splits stacks to sell an exact amount.
-- Auction listings cheaper than a vendor are bought up to what the vendor charges.
-- Your own fresh scan beats other players' prices for a minute.
-- No auction craft suggestions when none sold today.
-- The flight line is back (Settings), hidden while EllesmereUI's flight bar shows. Junk is left to Scrap when it's installed.
-- Clearer wording: what a vendor pays you and what a vendor charges you are told apart everywhere, and Auction and Vendor are spelled out instead of AH and V.
-- A price held over 10 seconds is checked again before buying.
+### Profit
+
+- Every recipe has a separate Auction Profit and Vendor Profit. They replace the single Profit column and appear in the tables, tooltips, Make me gold, sale notes, the Purge list and "Now profitable" alerts.
+- New Sells to vendor for column, next to the auction price.
+- New Minimum profit setting, 10% by default. Recipes below it are hidden. Skill up and Gear upgrades plans ignore it.
+- "Only profitable" is replaced by two boxes, "Only 10%+ Auction profit" and "Only 10%+ Vendor profit", on the Recipes and Learn pages. With both ticked, a recipe has to meet both.
+- New Craftable at Profit, Total Auction Profit and Total Vendor Profit columns. They price the whole batch against the real listings, not just the cheapest one, and allow for your gold, what is listed, your bag space and auction deposits.
+- The "how many?" pop-up and the Crafting plan price batches the same way and show both profits. The pop-up has a Max profitable button and says where buying will stop.
+- Best bets only shows recipes that make the minimum profit. A recipe sold at auction also has to have sold today, at least half as many as are listed. Hot sellers, with more sold today than listed, come first, then the rest by profit.
+- Make me gold uses the same rules for its picks and its Your materials list, and shows both profits on every line and in the totals.
+- Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold today.
+- New setting to only recommend auction recipes that sold today, on by default. A recipe with no sales today shows an orange 0 and a note in its tooltip.
+- Auction flips fill every column, are labelled as flips and have a fuller tooltip.
+
+### Buying
+
+- Buying stops before a material would take its recipe below the minimum profit. The plan is then cut to what was bought and chat says so. `/pc undo` puts it back.
+- A material several recipes share goes to the ones that can afford it most, and what you already have covers those first.
+- Recipes whose rare materials you already have are still finished, as long as each one earns more than its other materials cost.
+- One-click buying, on by default. Buy asks for the price and buys straight away if the item is still profitable. If the game won't allow it, it goes back to two clicks.
+- Quick Buy, the coin on each recipe. It plans as many crafts as make your minimum profit, buys the main auction material and opens the plan.
+- An auction price more than 5% above what the listings showed is refused and the listings are read again. 0.3.0 only warned, at 25%.
+- A price that has been waiting for over 10 seconds is checked again before buying.
+- Every auction purchase ends with a clear message, including the odd cases: paid but no answer, an answer but no gold taken, failed but gold taken, and a purchase that went through late.
+- Auction listings are bought whenever they are cheaper than a vendor (0.3.0 needed them 10% cheaper). If the price comes back at or above the vendor's, the item switches to the vendor.
+- Separate auctions never buy a listing bigger than the plan still needs.
+- Vendor buying buys as many as your gold allows and then says it ran out. 0.3.0 refused the whole lot.
+- In the Materials table, Have shows what is in the bank, in the mail and on its way. A purchase on its way shows "buying N" and its button can't be clicked again. The Buy tooltip says how many were left out to keep the minimum profit.
+- The Task Button shows "Waiting for the Auction House to confirm..." while a purchase is unanswered, vendor buying progress, and "Stopped buying X (under 10% profit)".
+
+### Selling
+
+- Selling to a vendor sells exact amounts, splitting stacks when needed. This covers crafted items, flips, spare materials, leftovers and the Purge.
+- Each vendor sale is checked before the next one, and anything left unsold is reported with the reason. At a vendor, buying finishes before selling starts, with one note at the end.
+- The Sell page has Auction Profit and Vendor Profit columns.
+- Junk is left to Scrap when Scrap is installed.
+
+### Scanning and prices
+
+- Scans also price what learnable recipes make and use.
+- On the Learn page, profits built on prices over 6 hours old are marked ~, and recipes with no known source or cost show ? instead of a profit.
+- Your own scan of an item beats prices shared by other players for a minute.
+
+### Bank
+
+- New "Use what's in my bank" setting, on by default. Turned off, the bank is ignored completely: nothing in it is counted, taken out or stored.
+
+### Tables and tooltips
+
+- Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.
+- Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.
+- Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.
+- Recipe tooltips list every ingredient with its price, where it comes from and how many you have. They also show what a vendor pays, both profits (with the reason when one is missing), how many you can craft at a profit, what limits it, and how many make your minimum.
+- The recipe count says how many recipes the minimum profit is hiding.
+- Craft tasks give the item count when a recipe makes more than one, e.g. "34 Seasoned Wolf Kabob (makes 102)".
+- The flight line is back, with a setting to turn it off. It hides while another flight timer is showing, such as EllesmereUI's flight bar.
 
 ## Fixed
 
-- Much less stutter in the Learn list, routes, the Task Button, the task list and the window.
-- Buying could go over the plan when the Auction House answered slowly.
-- Vendor purchases go one at a time, each checked in your bags. Anything that doesn't arrive is reported, never bought again.
-- Vendor buying missed plan changes made at the vendor.
-- Typing a plan count could change the wrong recipe.
-- The bank could crash with an item on the cursor.
-- Secret messages in combat no longer cause errors.
-- One auction purchase no longer prints several "Bought" lines.
-- No Hearthstone or teleport within the zone you're in, and no travel to a stop you're already at.
-- Vendor materials and crafts came in smaller batches than your bags allowed.
-- The Materials table says "buying N" while a purchase is on its way, and Have shows what's in the bank, the mail or on its way.
-- Scout recipes showed a profit for recipes with no known source or cost.
-- Place, NPC and recipe names shared in another alphabet (e.g. Russian) are translated or left out.
-- Clicking Buy on a second item before the first item's price arrived could confirm it at a price never checked.
-- A refused or blocked purchase could later be taken as bought, so the plan bought too little.
-- A halved retry the game blocked started over at the full amount on the next click.
-- One refused purchase limited the size of every later purchase, not just that item's.
-- Old live listings were still used after an item sold out or its price changed.
-- Finishing crafts whose scarce materials you hold could cost more than the craft brings in.
-- A short market was taken as a profit stop and cut the plan.
-- Turning off Use what's in my bank forgot purchases waiting in the mail.
-- The plan's bag check ignored the reagent bag, and batches counted room that reagent bag materials don't free.
-- Make me gold's Your materials list skipped the half-of-listed sales rule.
-- Routes could Hearthstone out and walk back for a stop in your own zone.
-- "Stopped buying" could get stuck on the Task Button away from the Auction House.
+### Buying
+
+- Buying could go over the plan when the Auction House answered slowly. A purchase with no answer after 10 to 15 seconds was dropped and could be bought again, and cancelling forgot a purchase already sent.
+- One purchase could print two or three "Bought" lines.
+- Clicking Buy on a second item before the first item's price arrived could take the first item's price for the second.
+- A refused purchase could later be counted as bought when gold was spent on something else.
+- When the game blocked an automatic price request, it wrongly said the Auction House sent no price. It now asks for a click.
+- If the Auction House changed a price you were holding, the confirm click paid the new price unchecked.
+- Vendor purchases not in your bags within a second were bought again, up to three times.
+- Vendor buying ignored plan changes made at the vendor, and kept offering items already bought.
+- The plan priced large auction buys up the listings past what a vendor charges, instead of buying the rest from the vendor.
+- Make me gold multiplied the cheapest price by the count while the cost climbed the listings. It overstated profit and could pick batches that lose money.
+- Stored live listings were used indefinitely, even after the item sold out or its price changed.
+
+### Selling
+
+- Vendor sales only sold whole stacks. Extras and the rest of spare materials were left unsold and forgotten.
+- Selling back leftovers could leave a split stack on the cursor when the only empty slot was in a profession bag.
+- During a Purge, unticked items could still be sold below cost, or drop out of the tick list.
+- An error while building the Purge list wiped your unticked items and could leave Purge on.
+- Posting on the newer Auction House could ask for more than you had while a stack was locked.
+
+### Bags and crafting
+
+- The plan's bag check ignored free slots in the reagent bag.
+- Vendor purchases and crafts came in smaller batches than your bags allowed, because the room freed by used-up materials wasn't counted.
+- The bank crashed with a stack overflow whenever an item was on the cursor.
+
+### Routes
+
+- Hearthstone and teleports were offered for stops in your own zone, including jumping out and walking back in.
+- The task list said "walk to X (3 yd)" for a stop you were already at, and measured later stops from where you stood instead of from the stop before.
+
+### Interface
+
+- A plan count typed while the rows moved could land on another recipe. Escape now cancels.
 - A Keep number typed on the Sell page could land on another item.
-- The empty recipe list blamed the profit boxes when Can afford had hidden the rows.
-- Gear upgrades now rechecks items after you learn a weapon skill.
+- The empty recipe list blamed "Only profitable" when Can afford had hidden the rows.
+- The "Stock up" alert always said "usually n/a".
+
+### Data
+
+- Unreadable (secret) game messages caused errors in the bank, mail, loot, vendor and auction messages, learned recipes and disenchanting.
+- Place, NPC and recipe names shared from clients in other languages showed in another alphabet. They are now translated or left out.
+- Shared prices from a player whose clock ran fast blocked newer prices until that time passed.
+- On newer clients, recipes read from the profession window lost their required materials, so Learn page profits came out too high.
+- The crafting station check errored on clients without C_TradeSkillUI, and the undercut check errored on clients without C_AuctionHouse when Auctionator was installed.
+
+## Performance
+
+- Faster auction scans. Each search asks for 100 items (was 25), results are read as soon as they are complete, live listings are read back to back, and listings that haven't changed in the last 2 hours aren't read again.
+- Much less work on each refresh. Your sales and purchases are indexed, bag slots and item info are read once, and sorting, searching and filtering no longer re-analyse every recipe. Tooltips are built when you hover.
+- The Learn list, route planning and nearest-place lookups do far less work. Routes keep their fixed part between uses and only search the current continent.
+- The direction arrows work out their aim once per tick and not at all while you stand still.
+- Scrolling the task list reuses the Task Button's step, and a guide change updates both in one pass.
+- Gear upgrades remembers whether you can wear an item and what it gives, instead of re-reading tooltips.

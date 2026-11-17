@@ -333,7 +333,7 @@ function Options:BuildInto(root, withTitle)
         function() return PC.db.openOnAH == true end,
         function(v) PC.db.openOnAH = v end)
     a = Check(inst, panel, a, "Buy in one click",
-        "Buy (or the Task Button) gets the Auction House's price and confirms it at once if it still pays. Off, or if the game won't allow it: the first click gets the price, the second buys.",
+        "Buy (or the Task Button) gets the Auction House's price and buys at once if the item is still profitable. Off, or if the game won't allow it: the first click gets the price, the second buys.",
         function() return PC.db.autoConfirm ~= false and not PC.db.confirmNeedsClick end,
         function(v) PC.db.autoConfirm = v; if v then PC.db.confirmNeedsClick = nil end end)
     a = Check(inst, panel, a, "Collect auction purchases and sale gold from the mail",

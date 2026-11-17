@@ -513,13 +513,14 @@ function UI:CreateShoppingPage(p)
     local cols = {
         { "name", "Recipe", nil, "The hammer opens it in your profession window.", text = true },
         { "planCount", "How many", 96, "How many crafts are planned. Type a number, or use - and +." },
-        { "craftable", "Craftable at Profit", 70, "How many you can craft at a profit with your materials and gold (or spending limit), buying the rest at live listing prices. Buying stops sooner, at your minimum profit." },
-        { "mats", "Mats", 84, "Cost of the materials still to buy (what you have counts first)." },
-        { "ahProfit", "Auction Profit", 92, "Auction Profit for all planned crafts, materials at live listing prices, after the 5% auction cut." },
-        { "vendorProfit", "Vendor Profit", 92, "Vendor Profit for all planned crafts, priced the same way." },
+        { "craftable", "Craftable at Profit", 70, "How many you can craft at a profit with your materials and gold (or spending limit), buying the rest at live listing prices. Buying stops sooner, at your minimum profit.", fit = "num" },
+        { "mats", "Mats", 84, "Cost of the materials still to buy (what you have counts first).", fit = "gold" },
+        { "ahProfit", "Auction Profit", 92, "Auction Profit for all planned crafts, materials at live listing prices, after the 5% auction cut.", fit = "gold" },
+        { "vendorProfit", "Vendor Profit", 92, "Vendor Profit for all planned crafts, priced the same way.", fit = "gold" },
         { "matsMode", "Materials", 110, "Cheapest or top-quality materials (recipes with quality ranks). At the profession window: craft them.", text = true },
         { nil, nil, 30 }, -- the X that takes it off the plan
     }
+    cols.font = UI.CELL_FONT
     self.planHeaders = Columns(pp, cols, "plan")
     local C = cols.by
     self.planEmpty = pp:CreateFontString(nil, "OVERLAY", "GameFontDisable")
@@ -576,8 +577,8 @@ function UI:CreateShoppingPage(p)
         row.cell = {}
         for _, k in ipairs({ "craftable", "mats", "ahProfit", "vendorProfit" }) do
             local fs = RowText(row, C[k].x, C[k].w - 4, "RIGHT")
-            fs:SetFontObject("GameFontHighlight")
-            fs.bigFont = "GameFontHighlight"
+            fs:SetFontObject(UI.CELL_FONT)
+            fs.bigFont = UI.CELL_FONT
             row.cell[k] = fs
         end
         local btnX = C.matsMode.x + C.matsMode.w - 4 - 100
@@ -659,10 +660,10 @@ function UI:CreateShoppingPage(p)
     HeaderStrip(mp)
     local mcols = {
         { "name", "Materials for everything", nil, "Everything to buy or make for the whole plan.", text = true },
-        { "need", "Need", 60, "How many the whole plan needs." },
+        { "need", "Need", 60, "How many the whole plan needs.", fit = "num" },
         { "have", "Have", 100, "How many you have: bags, bank, mail and purchases on the way (the brackets say where)." },
         { "buy", "Buy", 70, "How many are still to buy. Make: cheaper to craft yourself." },
-        { "each", "Each", 96, "Average price each, buying from the cheapest listing up." },
+        { "each", "Each", 96, "Average price each, buying from the cheapest listing up.", fit = "money" },
         { "total", "Total", 196, "What buying them costs. Red with a +: not enough are listed." },
         { nil, nil, 92 }, -- the Buy button
     }

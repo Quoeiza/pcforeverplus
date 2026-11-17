@@ -41,9 +41,9 @@ function UI:CreateItemsPage(p)
     local cols = {
         { "name", "Item", nil, "Every item your recipes make or use.", text = true },
         { "usage", "Used as", 150, "Made by your recipes (crafted), a material, or both. Materials: how many of your recipes use it." },
-        { "ah", "Auction price", 100, "The cheapest price at auction at the last scan (or from Auctionator or TSM)." },
+        { "ah", "Auction price", 100, "The cheapest price at auction at the last scan (or from Auctionator or TSM).", fit = "money" },
         { "trend", "Trend", 90, "Now against its usual price." },
-        { "vendor", "Vendor charges", 100, "What a vendor charges you, after Bartering (not what a vendor pays you)." },
+        { "vendor", "Vendor charges", 100, "What a vendor charges you, after Bartering (not what a vendor pays you).", fit = "money" },
         { "status", "Status", 110, "Priced at the last scan, not at auction, or not scanned yet.", text = true },
     }
     self.itemHeaders = Columns(lp, cols, "items")
@@ -541,7 +541,7 @@ function UI:CreatePnLPage(p)
         { "t", "When", 110, "When it happened." },
         { "kind", "Type", 100, "Bought, sold at auction, sold to a vendor, or an auction fee.", text = true },
         { "item", "Item", nil, "What was bought or sold.", text = true },
-        { "signed", "Amount", 150, "Gold in (green) or out." },
+        { "signed", "Amount", 150, "Gold in (green) or out.", fit = "gold" },
     }
     self.recentHeaders = Columns(tb, cols, "recent")
     local C = cols.by
@@ -825,12 +825,12 @@ function UI:CreateSellPage(p)
     HeaderStrip(lp)
     local cols = {
         { "name", "Crafted item", nil, "What you crafted from your plan. Below: spare materials a vendor buys back.", text = true },
-        { "have", "Have", 56, "How many you have." },
+        { "have", "Have", 56, "How many you have.", fit = "num" },
         { "stock", "Keep", 64, "Always keep this many (type a number). Materials: ticked goes back to a vendor." },
-        { "price", "Price each", 100, "The price it's posted at: the cheapest listing, never below your cost." },
+        { "price", "Price each", 100, "The price it's posted at: the cheapest listing, never below your cost.", fit = "money" },
         { "deposit", "Deposit", 110, "The Auction House's deposit for the best listing time." },
-        { "ahProfit", "Auction Profit", 100, "Profit selling all you have at auction, after its 5% cut and the deposit." },
-        { "vProfit", "Vendor Profit", 100, "Profit selling all you have to a vendor. Materials: what a vendor pays for them." },
+        { "ahProfit", "Auction Profit", 100, "Profit selling all you have at auction, after its 5% cut and the deposit.", fit = "gold" },
+        { "vProfit", "Vendor Profit", 100, "Profit selling all you have to a vendor. Materials: what a vendor pays for them.", fit = "gold" },
         { nil, nil, 100 }, -- the Post button
     }
     self.sellHeaders = Columns(lp, cols, "sell")
@@ -1241,13 +1241,13 @@ function UI:CreateLearnPage(p)
     HeaderStrip(lp)
     local cols = {
         { "name", "Recipe", nil, "Recipes, patterns and plans you don't know yet.", text = true },
-        { "skill", "Skill", 50, "The skill it needs." },
-        { "level", "Lvl", 44, "The level it needs." },
+        { "skill", "Skill", 50, "The skill it needs.", fit = "num" },
+        { "level", "Lvl", 44, "The level it needs.", fit = "num" },
         { "source", "Source", 84, "Where it comes from: vendor, trainer, drop, quest...", text = true },
         { "where", "Where", 170, "Who sells or teaches it, or where it drops (and the zone).", text = true },
         { "cost", "Cost", 90, "What it costs to get." },
-        { "ahProfit", "Auction Profit", 90, "Auction Profit per craft once learnt, after the 5% auction cut. ~ = uses an auction price over 6 hours old. ? = no known source or cost yet." },
-        { "vendorProfit", "Vendor Profit", 90, "Vendor Profit per craft once learnt, selling to a vendor. ~ = a material's auction price is over 6 hours old." },
+        { "ahProfit", "Auction Profit", 90, "Auction Profit per craft once learnt, after the 5% auction cut. ~ = uses an auction price over 6 hours old. ? = no known source or cost yet.", fit = "money" },
+        { "vendorProfit", "Vendor Profit", 90, "Vendor Profit per craft once learnt, selling to a vendor. ~ = a material's auction price is over 6 hours old.", fit = "money" },
         { nil, nil, 84 }, -- Go and +
     }
     self.learnHeaders = Columns(lp, cols, "learn")
@@ -1526,9 +1526,9 @@ function UI:CreateHistoryPage(p)
         { "t", "Date", 110, "When it happened." },
         { "kind", "Type", 130, "Bought at auction, sold at auction, sold to a vendor, or an auction fee.", text = true },
         { "item", "Item", nil, "What was bought or sold.", text = true },
-        { "qty", "Qty", 60, "How many." },
-        { "each", "Each", 120, "The price of one." },
-        { "signed", "Amount", 130, "Gold in (green) or out (red)." },
+        { "qty", "Qty", 60, "How many.", fit = "num" },
+        { "each", "Each", 120, "The price of one.", fit = "money" },
+        { "signed", "Amount", 130, "Gold in (green) or out (red).", fit = "gold" },
     }
     self.historyHeaders = Columns(lp, cols, "history")
     local C = cols.by
