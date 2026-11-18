@@ -481,6 +481,13 @@ function Sell:CostEach(itemID)
     return now, false
 end
 
+-- A posting note when the cheapest listing was a spike: what it was, and what the item usually sells at
+function Sell:SpikeNote(it)
+    if not (it and it.spiked and it.usual) then return "" end
+    return (" |cffffd100The cheapest listed (%s) is a price spike: it usually sells at about %s.|r"):format(
+        PC:Money(it.spiked, false, true), PC:Money(it.usual, false, true))
+end
+
 -- Smart price: the cheapest listing (no undercutting); nil if we have no AH price.
 -- Never below what it cost you (after the AH's cut): then it says "hold".
 function Sell:Price(itemID)
@@ -490,6 +497,10 @@ function Sell:Price(itemID)
     local cost, known = self:CostEach(itemID)
     if cost then floorPrice = math.ceil(cost / (1 - self.AH_CUT)) end
     if not cheapest then return nil, floorPrice, cost, nil, known end
+    -- a spiked cheapest (a buyout left a few overpriced listings): posted at what it can sell for, the
+    -- most PC.SPIKE times its usual price (matching the spike would never sell)
+    local usual, spiked = PC.UsualPrice and PC:UsualPrice(itemID), nil
+    if usual and cheapest > usual * PC.SPIKE then spiked, cheapest = cheapest, math.floor(usual * PC.SPIKE + 0.5) end
     -- match the cheapest listing: no undercutting
     local price = math.max(cheapest - self.UNDERCUT, 1)
     -- exact to the copper. Only Retail's AH refuses copper in a price (it wants whole silver): there,
@@ -499,7 +510,7 @@ function Sell:Price(itemID)
         if price < 100 then tooCheap = true end
         price = math.max(price - price % 100, 100)
     end
-    return price, floorPrice, cost, tooCheap, known
+    return price, floorPrice, cost, tooCheap, known, spiked, usual
 end
 
 -- This AH only takes prices in whole silver: Retail's. WoW Forever and classic take copper.
@@ -1002,7 +1013,7 @@ function Sell:ItemsRaw()
     for id in pairs(self:Stock()) do if known[id] and not have[id] then have[id] = 0 end end
     local out = {}
     for id, n in pairs(have) do
-        local price, floorPrice, cost, tooCheap, costKnown = self:Price(id)
+        local price, floorPrice, cost, tooCheap, costKnown, spiked, usual = self:Price(id)
         local hold = price and floorPrice and price < floorPrice or false
         if tooCheap then hold = true end
         local profit, duration, deposit
@@ -1068,7 +1079,7 @@ function Sell:ItemsRaw()
         if not skip then out[#out + 1] = { id = id, name = PC:ItemName(id) or ("Item " .. id), have = n, sellN = sellN, price = price, floor = floorPrice,
             cost = cost, profit = profit, hold = hold, stock = self:Stock()[id], duration = duration, deposit = deposit,
             vendor = vendor, vendorPrice = vend, tooCheap = tooCheap and not vendor,
-            ahProfit = ahProfit, vendorProfit = vendorProfit } end
+            ahProfit = ahProfit, vendorProfit = vendorProfit, spiked = spiked, usual = usual } end
     end
     table.sort(out, function(a, b)
         if (a.have > 0) ~= (b.have > 0) then return a.have > 0 end
@@ -1319,8 +1330,8 @@ function Sell:Post(itemID)
     self.pending = { itemID = itemID, n = qty, t = GetTime(), retail = true, many = (not commodity and qty > 1) }
     it.price = price
     Posted:Add(itemID, qty)
-    PC.Buy:Say(("|cff40ff40Posted %d %s at %s each for %dh (deposit %s).|r"):format(qty, it.name, PC:Money(it.price, false, true),
-        self:Hours()[duration] or 24, PC:Money(deposit)))
+    PC.Buy:Say(("|cff40ff40Posted %d %s at %s each for %dh (deposit %s).|r%s"):format(qty, it.name, PC:Money(it.price, false, true),
+        self:Hours()[duration] or 24, PC:Money(deposit), self:SpikeNote(it)))
     PC:RefreshUI()
 end
 
@@ -1349,8 +1360,8 @@ function Sell:ClassicPost(it, slot)
     -- the server answers a moment later; an "Internal auction error" within 2s means it refused it
     self.pending = { itemID = itemID, n = stackSize, t = GetTime(), retried = self.retrying }
     Posted:Add(itemID, stackSize, stackSize)
-    PC.Buy:Say(("|cff40ff40Posted %d %s at %s each for %dh (deposit %s).|r"):format(stackSize, it.name, PC:Money(it.price, false, true),
-        self:Hours()[duration] or 24, PC:Money(deposit)))
+    PC.Buy:Say(("|cff40ff40Posted %d %s at %s each for %dh (deposit %s).|r%s"):format(stackSize, it.name, PC:Money(it.price, false, true),
+        self:Hours()[duration] or 24, PC:Money(deposit), self:SpikeNote(it)))
     PC:RefreshUI()
 end
 

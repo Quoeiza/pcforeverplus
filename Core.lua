@@ -2216,6 +2216,63 @@ function PC:SalesEstimateRaw(itemID, seconds)
     return math.floor(sold + 0.5), time() - first
 end
 
+-- What an item usually sells for at auction: whenever the listed count fell between two scans some sold,
+-- at about the cheapest price of the time; the middle of those prices, weighted by how many went. The
+-- last day's sales when there are enough of them, else the last 3 days'. nil without the evidence:
+-- under a day of scans, fewer than USUAL_MIN_SALES sold or fewer than USUAL_MIN_EVENTS times.
+-- (One overpriced "sale", a real-money trade say, barely moves a middle weighted by how many sold.)
+PC.USUAL_MIN_SALES = 10
+PC.USUAL_MIN_EVENTS = 3
+PC.SPIKE = 1.5 -- the auction price counted on is never more than this times the usual price
+function PC:UsualPrice(itemID)
+    local memo = self._memo
+    local key = memo and itemID and ("usual" .. itemID)
+    if key and memo[key] ~= nil then return memo[key] or nil end
+    local p = self:UsualPriceRaw(itemID)
+    if key then memo[key] = p or false end
+    return p
+end
+function PC:UsualPriceRaw(itemID)
+    local sup = itemID and self:SupplyHistory()[itemID]
+    local hist = itemID and self:History()[itemID]
+    if not sup or #sup < 2 or not hist or #hist == 0 then return nil end
+    if time() - (sup[1].t or time()) < 86400 then return nil end -- under a day of scans
+    local function window(seconds)
+        local since = time() - seconds
+        local sales, units, events, hi = {}, 0, 0, 0
+        for i = 2, #sup do
+            local a, b = sup[i - 1], sup[i]
+            -- the cheapest price before the drop (the last one recorded by then)
+            while hi < #hist and hist[hi + 1].t <= a.t + 5 do hi = hi + 1 end
+            if b.t >= since and b.q < a.q and hi > 0 then
+                local n = a.q - b.q
+                sales[#sales + 1] = { p = hist[hi].p, n = n }
+                units, events = units + n, events + 1
+            end
+        end
+        if units < self.USUAL_MIN_SALES or events < self.USUAL_MIN_EVENTS then return nil end
+        table.sort(sales, function(x, y) return x.p < y.p end)
+        local acc = 0
+        for _, s in ipairs(sales) do
+            acc = acc + s.n
+            if acc >= units / 2 then return s.p end
+        end
+    end
+    return window(86400) or window(3 * 86400)
+end
+
+-- The auction price to count on: today's cheapest listing, but never more than SPIKE times what it usually
+-- sells for (a buyout leaving a few overpriced listings, or someone asking silly money, isn't a price it
+-- sells at). Only a rise is capped: a lower price is always believed. Returns the price, and when it was
+-- capped, what it usually sells for and the price listed now.
+function PC:SellAtPrice(itemID)
+    local p = self:Price(itemID)
+    if not p then return nil end
+    local usual = self:UsualPrice(itemID)
+    if usual and p > usual * self.SPIKE then return math.floor(usual * self.SPIKE + 0.5), usual, p end
+    return p
+end
+
 -- Exactly how many you sold yourself (from your Profit & loss history)
 function PC:MySales(itemName, seconds)
     if not itemName then return 0 end
@@ -3514,7 +3571,7 @@ function PC:Evaluate(r, mode, quality)
             end
         end
     end
-    local sell = self:Price(outID)
+    local sell, spikeUsual, spikeNow = self:SellAtPrice(outID)
     local ahProfit
     -- (under 1s on an AH that only takes whole silver it can't be listed at that price: no AH route)
     if sell and not missing and self:AHSellable(sell) then ahProfit = sell * r.qty * (1 - self.AH_CUT) - cost end
@@ -3540,7 +3597,7 @@ function PC:Evaluate(r, mode, quality)
         mode = mode, cost = (not missing) and cost or nil, outID = outID,
         quality = quality, qualityUsed = qFallback or quality,
         sell = sell, ahProfit = ahProfit, vSell = vSell, vendorProfit = vendorProfit,
-        profit = profit, route = route, deProfit = deProfit,
+        profit = profit, route = route, deProfit = deProfit, spikeUsual = spikeUsual, spikeNow = spikeNow,
     }
 end
 
@@ -3623,7 +3680,8 @@ function PC:AnalyzeRaw()
             r = r,
             cost = cost,
             sell = best.sell and best.sell * r.qty or nil,  -- per craft (used for the math)
-            sellEach = best.sell,                           -- one item: matches the AH's unit price
+            sellEach = best.sell,                           -- one item: the AH's price (capped when it's spiked)
+            spikeNow = best.spikeNow, spikeUsual = best.spikeUsual, -- spiked: what's listed now, what it usually sells at
             ahProfit = best.ahProfit,
             vendorSell = best.vSell and best.vSell * r.qty or nil,
             vendorProfit = best.vendorProfit,

@@ -2274,7 +2274,7 @@ function UI:CreateRecipesPage(p)
     local cols = {
         { "name", "Name", nil, "The arrows show the chance of a skill-up.", text = true },
         { "cost", "Materials", 76, "Material cost of one craft, each from its cheapest source: the Auction House (up the real listings, as the cheapest may not have enough), a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
-        { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing.", fit = "money" },
+        { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing. Orange: the cheapest listing is a price spike, well above what it usually sells for, so it's counted at no more than 1.5 times that.", fit = "money" },
         { "vendorSell", "Sells at vendor", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
         { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut.", fit = "money" },
         { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
@@ -2382,8 +2382,13 @@ function UI:CreateRecipesPage(p)
                     tip[#tip + 1] = ("Makes %s per craft: %s each = |cffffffff%s per craft|r."):format(
                         qty % 1 == 0 and tostring(qty) or ("%.1f"):format(qty), PC:Money(e.sellEach), PC:Money(e.sell))
                 else
-                    tip[#tip + 1] = "Sells for " .. PC:Money(e.sellEach) .. " (cheapest listing)."
+                    tip[#tip + 1] = "Sells for " .. PC:Money(e.sellEach) .. (e.spikeNow and " (counted at)." or " (cheapest listing).")
                 end
+            end
+            -- a spiked price: what's listed now isn't what it sells at
+            if e.spikeNow then
+                tip[#tip + 1] = ("|cffff8040Listed now at %s, but it sells at about %s: counted at %s at most. Likely a buyout or an overpriced listing, so it won't sell at that price.|r"):format(
+                    PC:Money(e.spikeNow), PC:Money(e.spikeUsual), PC:Money(e.sellEach))
             end
             if e.vendorSell then tip[#tip + 1] = ("A vendor pays %s per craft."):format(PC:Money(e.vendorSell)) end
             if e.cost then tip[#tip + 1] = "Materials per craft: " .. PC:Money(e.cost) end
@@ -2761,7 +2766,7 @@ function UI:UpdateRecipeRows()
             -- orange "?" = that vendor price hasn't been seen paid yet
             local sure = paid[e.outID or e.r.output]
             -- one craft (all the items it makes), like Mats; an AH flip: its price on the AH
-            FitCell(c.sell, PC:Money(e.ahFlip and e.sellAH or e.sell))
+            FitCell(c.sell, e.spikeNow and ("|cffff8040" .. PC:Money(e.sell, false, true) .. "|r") or PC:Money(e.ahFlip and e.sellAH or e.sell))
             FitCell(c.vendorSell, e.vendorSell and (PC:Money(e.vendorSell) .. (sure and "" or "|cffff8040?|r")) or PC:Money(nil))
             FitCell(c.ahProfit, PC:Money(e.ahProfit, true))
             -- V Profit in blue when that's where it sells

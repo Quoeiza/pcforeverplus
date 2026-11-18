@@ -21,6 +21,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold today.
 - New setting to only recommend auction recipes that sold today, on by default. A recipe with no sales today shows an orange 0 and a note in its tooltip.
 - Auction flips fill every column, are labelled as flips and have a fuller tooltip.
+- A sell price that has spiked well above what the item usually sells for (a buyout leaving a few overpriced listings, say) is counted at no more than 1.5 times its usual sale price, in every profit, table, Best bets and Make me gold. The Sells at auction cell turns orange and the tooltip explains. The usual price comes from the sales your scans see, needs a day of them, and follows a real price rise within a day.
 - ProfitCrafter users share what their plans will put on the Auction House (crafts still to do, and items made but not yet posted), when a plan changes and again when it's gone. The advice allows for it but never blocks anything. The recipe tooltip says what's coming, Best bets ranks those recipes lower, and the "how many?" pop-up, Make me gold and Quick Buy suggest a smaller batch, never less than half. Vendor recipes aren't affected.
 
 ### Buying
@@ -41,6 +42,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 
 ### Selling
 
+- Posting never matches a spiked cheapest listing, which wouldn't sell. It posts at no more than 1.5 times the usual price and says why.
 - Selling to a vendor sells exact amounts, splitting stacks when needed. This covers crafted items, flips, spare materials, leftovers and the Purge.
 - Each vendor sale is checked before the next one, and anything left unsold is reported with the reason. At a vendor, buying finishes before selling starts, with one note at the end.
 - The Sell page has Auction Profit and Vendor Profit columns.
