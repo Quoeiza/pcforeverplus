@@ -3,7 +3,7 @@
 ## Notes: Shows which of your known recipes make a profit on the Auction House and what materials to buy.
 ## Author: MostlyNotBroken
 ## IconTexture: Interface\AddOns\ProfitCrafterForever\Media\Icon
-## Version: 0.4.5
+## Version: 0.4.6
 ## AddonCompartmentFunc: ProfitCrafter_OnCompartmentClick
 ## SavedVariables: ProfitCrafterDB
 ## SavedVariablesPerCharacter: ProfitCrafterCharDB

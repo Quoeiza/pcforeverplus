@@ -324,7 +324,9 @@ function Gold:Build(budget)
         end
         if #picks >= self.MAX_ROWS then break end
     end
-    self.slotsUsed, self.slotsFree = slotsOf(chosen), free
+    -- (shown with the reagent bag: the materials it takes, and its free slots)
+    local need, inReagent = slotsOf(chosen)
+    self.slotsUsed, self.slotsFree = need + (inReagent or 0), free + PC:FreeReagentBagSlots()
     local total = costOf(chosen)
     -- each line: the gold it adds to the shopping list in turn (materials priced up the listings; yours go
     -- to the first lines that use them, free), what it brings in, and which of yours it uses. The lines add
@@ -377,7 +379,8 @@ function Gold:Open()
         w.title:SetText("Make me gold")
         w.budget = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         w.budget:SetPoint("TOPLEFT", 14, -40)
-        -- selling what's already in your bags (what you're still carrying, spare materials): off keeps them
+        -- selling what's already in your bags and bank (what you're still carrying, spare materials, crafts made
+        -- only from your materials): off keeps them
         w.sellBags = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
         w.sellBags:SetSize(22, 22)
         w.sellBags:SetPoint("TOPLEFT", 10, -58)
@@ -387,15 +390,15 @@ function Gold:Open()
         end)
         w.sellBags:SetScript("OnEnter", function(btn)
             GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Sell what's already in my bags")
-            GameTooltip:AddLine("What you're still carrying from an earlier plan, and materials no craft here uses.", 1, 1, 1, true)
+            GameTooltip:SetText("Sell what's already in my bags & bank")
+            GameTooltip:AddLine("What you're still carrying from an earlier plan, materials no craft here uses, and crafts made only from your materials.", 1, 1, 1, true)
             GameTooltip:AddLine("Untick to keep them.", 1, 1, 1, true)
             GameTooltip:Show()
         end)
         w.sellBags:SetScript("OnLeave", function() GameTooltip:Hide() end)
         local l7 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         l7:SetPoint("LEFT", w.sellBags, "RIGHT", 2, 0)
-        l7:SetText("Sell what's already in my bags")
+        l7:SetText("Sell what's already in my bags & bank")
         local l3 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         l3:SetPoint("TOPLEFT", 14, -88)
         l3:SetText("Don't sell more gear than")
@@ -462,10 +465,13 @@ function Gold:Update()
     self.picks = picks
     -- deposits for what goes on the AH come out of what's left of your spending limit
     local room = { left = math.max(budget - (#picks > 0 and total or 0), 0) }
-    -- (what's in your bags is only sold when you want it sold)
+    -- (what's in your bags and bank is only sold, or crafted on its own, when you want it to be)
     local keep = PC.db.goldSellBags == false
-    local left, mats, sells = keep and {} or self:Carrying(room), self:MatCrafts(picks, room), {}
-    if not keep then sells = self:MatSells(picks, mats, left, room) end
+    local left, mats, sells = {}, {}, {}
+    if not keep then
+        left, mats = self:Carrying(room), self:MatCrafts(picks, room)
+        sells = self:MatSells(picks, mats, left, room)
+    end
     self.left, self.mats, self.sells = left, mats, sells
     local words = { post = "|cff40c0ffpost at auction|r", disenchant = "|cffc080ffdisenchant for dust|r", vendor = "|cffffd100sell to a vendor|r" }
     local function routeWords(e)
@@ -478,13 +484,9 @@ function Gold:Update()
         local label = (route == "Vendor" and "Vendor Profit") or (route == "Disenchant" and "Disenchant Profit") or "Auction Profit"
         return "|cffffffff" .. label .. "|r " .. PC:Money(x.profit or 0, true, true)
     end
-    -- what of yours a line uses (free: you already have it)
+    -- a line that uses materials you already have (free)
     local function yours(x)
-        if not x.own or #x.own == 0 then return "" end
-        local parts = {}
-        for _, o in ipairs(x.own) do parts[#parts + 1] = ("%d %s"):format(o.n, PC:ItemName(o.id) or ("item " .. tostring(o.id))) end
-        local text = #parts > 1 and (table.concat(parts, ", ", 1, #parts - 1) .. " and " .. parts[#parts]) or parts[1]
-        return "   |cff888888(plus " .. text .. " you already have)|r"
+        return (x.own and #x.own > 0) and "   |cff888888(using bag materials)|r" or ""
     end
     local n, y = 0, -154
     local function line(text, kind, key)

@@ -1,6 +1,6 @@
 # ProfitCrafter Forever Plus
 
-Version 0.4.5. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
+Version 0.4.6. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
 The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
@@ -19,8 +19,8 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - Best bets only shows recipes that make the minimum profit and, for auction, sold at least half as many in the last 24 hours as are listed. They're ranked by gold an hour for the batch Make me gold would make (Craftable at Profit, no more than your market share): its profit over the time the crafts take at the game's cast time, plus 2 minutes to buy and post, so a batch making a few silver never outranks one making gold. One that sold out over the last day, not because of a buyout, scores a quarter more. The recipe tooltip shows the gold an hour, the profit, the crafts and the time.
 - Make me gold uses the same rules for its picks and its Your materials list.
 - Make me gold makes each recipe in a batch the size of your market share (your share of what players typically buy in a day, at most a fifth of what's listed, half for something you haven't sold yet) instead of 2 or 3 at a time, and your own sales still raise it. Misc gets 5% more for a hot seller, instead of when 100 or more sell a day. It picks 2 to 6 recipes by gold an hour, leaving out any that make under half of the best one's.
-- Make me gold has a "Sell what's already in my bags" tick box: untick it to keep what you're still carrying and your spare materials. The "Only things that sell N a day" box is gone, and the share boxes read "Don't sell more gear (misc) than N% of what players typically buy in a day".
-- Make me gold shows only the profit the way each line is sold. Materials you already have count as free, and the line ends with what of yours it uses. The totals are Total predicted cost (the gold you spend), returns (the gold you get back, including what's in your bags) and profit, then the bag slots used.
+- Make me gold has a "Sell what's already in my bags & bank" tick box: untick it to keep what you're still carrying, your spare materials, and the materials its Your materials crafts would use. The "Only things that sell N a day" box is gone, and the share boxes read "Don't sell more gear (misc) than N% of what players typically buy in a day".
+- Make me gold shows only the profit the way each line is sold. Materials you already have count as free, and the line ends with "(using bag materials)". The totals are Total predicted cost (the gold you spend), returns (the gold you get back, including what's in your bags) and profit, then the bag slots used, reagent bag included.
 - Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold in the last day.
 - New setting to only recommend auction recipes that sold in the last day, on by default. A recipe with no sales in the last day shows an orange 0 and a note in its tooltip.
 - Auction flips fill every column, are labelled as flips and have a fuller tooltip.

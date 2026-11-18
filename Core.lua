@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.5" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.6" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
@@ -363,7 +363,8 @@ end
 
 -- Slots a list of plan entries needs at its fullest: every material bought, nothing crafted yet,
 -- plus the crafted items that don't stack over what's been used up. Counts only what you still
--- need to get (what's in your bags is already taking its slots).
+-- need to get (what's in your bags is already taking its slots). Also returns the reagent bag slots the
+-- materials take (left out of the first number).
 function PC:PlanSlots(entries)
     local slots, tools = 0, 0
     local list = self:CombinedShoppingList(entries, 1)
@@ -398,7 +399,7 @@ function PC:PlanSlots(entries)
         end
     end
     -- (materials used up from the reagent bag free no room for what's made)
-    return slots - inReagent + tools + made + math.min(inReagent, credit)
+    return slots - inReagent + tools + made + math.min(inReagent, credit), inReagent
 end
 
 -- Gold to plan with: your spending limit (bottom-left of the window) if you set one, never more than
