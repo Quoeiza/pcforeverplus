@@ -236,8 +236,8 @@ function Next:ComputeStep()
         elseif it.sellN > 0 and it.price and not it.hold then sell[#sell + 1] = it end
     end
     mark("sell")
-    -- the trip to the AH to sell was skipped: not for an hour (standing at the AH, it still posts)
-    if PC:SellSnoozed() and not PC.ahOpen then sell = {} end
+    -- selling was skipped: not for an hour (at the AH too: Skip pressed there means not now)
+    if PC:SellSnoozed() then sell = {} end
     -- crafts still to do with materials already in your bags (profession window open or not)
     Craft.blocked, Craft.noRoom = {}, nil
     local craft = {}
@@ -301,7 +301,7 @@ function Next:ComputeStep()
         if PC.Mail:Count() == 0 then
             mailN = 0
             if not PC.Mail.busy and PC.cdb then PC:MailEmptied(); PC.Mail.itemsWaiting = nil end
-        elseif not PC.Mail.busy and (PC.Mail:HasMoney() or PC:FreeBagSlotsOnly() > (PC.BUY_RESERVE or 1)) then
+        elseif not PC.Mail.busy and not PC.Mail:Snoozed() and (PC.Mail:HasMoney() or PC:FreeBagSlotsOnly() > (PC.BUY_RESERVE or 1)) then
             -- (bags full and only items left: nothing to take now - that's handled below, no loop)
             local M = PC.Mail
             local s0 = { text = "Collect auction mail", cat = "Mail", tip = ("%d auction mail%s to take: purchases, sales gold, returns."):format(M:Count(), M:Count() == 1 and "" or "s"),
@@ -704,7 +704,7 @@ function Next:ComputeStep()
     -- at the mailbox with full bags: take the gold, leave the items until there's room
     if PC.Mail and PC.Mail:Open() and PC.Mail:Count() > 0 and PC:FreeBagSlotsOnly() <= (PC.BUY_RESERVE or 1) and not PC.Mail:HasMoney() then
         PC.Mail.itemsWaiting = PC.Mail:Count()
-    elseif PC.Mail and PC.Mail:Open() and PC.Mail:Count() > 0 then
+    elseif PC.Mail and PC.Mail:Open() and PC.Mail:Count() > 0 and not PC.Mail:Snoozed() then
         s.text = "Collect auction mail"
         s.run = function() PC.Mail:Collect() end
         return s
@@ -1382,8 +1382,31 @@ end
 
 function Next:Skip()
     local s = self:Compute()
-    if s.skip then Safe("skip", s.skip) else PC.Buy:Say("This task can't be skipped.") end
+    if s.skip then Safe("skip", s.skip)
+    elseif not self:SkipTask(s) then PC.Buy:Say("This task can't be skipped.") end
     PC:RefreshUI()
+end
+
+-- A task with no skip of its own (a craft, a purchase, the bank): skipped the way its tick box on the
+-- tasks list does it. On the way somewhere, that's the task you're going there for.
+function Next:SkipTask(s)
+    local St = PC.Steps
+    if not (St and St.Skip and St.IsTask) then return false end
+    local ok, list = pcall(St.Build, St)
+    if not ok or type(list) ~= "table" then return false end
+    local cat = St:CatOf(s)
+    local function plain(t) return ((t or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()) end
+    local now = plain(s.text)
+    for i, st in ipairs(list) do
+        if St:IsTask(st) and not st.skipped then
+            -- the first task on the list, if it's the one the button shows ("buy 25 X" in "Buy 25 X")
+            local same = cat == "Travel" or St:CatOf(st) == cat or now:find(plain(st.text), 1, true) ~= nil
+            if not st.rm or not same then return false end
+            St:Skip(st, i)
+            return true
+        end
+    end
+    return false
 end
 
 function Next:Run()

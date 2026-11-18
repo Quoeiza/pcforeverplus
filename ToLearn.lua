@@ -411,10 +411,16 @@ function ToLearn:ListRaw()
             for _, t in pairs(list) do
                 if not t.used then
                     local place = t.trainer and PC.Places and PC.Places:Table()[t.trainer]
+                    -- a trainer another player read that you haven't been to: its name and zone from the list
+                    local tname, tmap = (t.trainer or ""):match("^trainer:(.+):(%d+)$")
+                    tmap = place and place.map or tonumber(tmap)
+                    -- the city trainers teach the same: the one where you are stands in for a city trainer
                     local near = trainerHere(prof)
-                    if near and not isHere(place) and self:MayTeach(near.name, self:Norm(t.name)) then place = near end
+                    local city = tmap and PC.Travel and PC.Travel.CITIES and PC.Travel.CITIES[tmap]
+                    if near and city and not isHere(place) and self:MayTeach(near.name, self:Norm(t.name)) then place = near end
+                    local zone = place and place.zone or (tmap and PC.Places and PC.Places.MapName and PC.Places.MapName(tmap)) or nil
                     add(prof, t.name, { skill = t.skill, level = t.level, source = "Trainer", cost = t.cost,
-                        where = place and place.name or "Your trainer", zone = place and place.zone, place = place })
+                        where = place and place.name or tname or "Your trainer", zone = zone, place = place })
                 end
             end
         end
@@ -789,7 +795,7 @@ function ToLearn:FromDB(prof, name, at)
             if not p and not first and self:Lacks(prof, norm) then
                 -- the trainers you've read don't teach it, and the data names none
                 f.where = "Unknown trainer"
-                f.text = "Not taught by the trainers you've visited, and the data names no other."
+                f.text = "Not taught by the trainers you've visited, and no ProfitCrafter user has seen a trainer teach it yet."
             end
         end
         if p then f.place, f.zone, f.where = p, p.zone, p.name or f.where

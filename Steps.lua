@@ -412,9 +412,9 @@ function Steps:Build()
             purged[it.id] = true
         end
     end
-    -- 0) standing at the AH with things to sell: post them before going anywhere
+    -- 0) standing at the AH with things to sell: post them before going anywhere (unless selling was skipped)
     local postedHere = purged
-    if PC.ahOpen and PC.Sell then
+    if PC.ahOpen and PC.Sell and not PC:SellSnoozed() then
         for _, it in ipairs(PC.Sell:Items()) do
             if not purged[it.id] and it.sellN > 0 and it.price and not it.hold and not it.vendor then
                 out[#out + 1] = { cat = "AH", text = ("post %d %s"):format(it.sellN, it.name), rm = { kind = "sell", id = it.id } }
@@ -572,7 +572,7 @@ function Steps:Build()
         elseif it.sellN > 0 and it.price and not it.hold then toAH[#toAH + 1] = { n = it.sellN, name = it.name, id = it.id }; seen[it.id] = true end
     end
     -- selling skipped for an hour: no AH posting rows (or trip) until then
-    local sellOff = PC:SellSnoozed() and not PC.ahOpen
+    local sellOff = PC:SellSnoozed()
     if sellOff then toAH = {} end
     for _, e in ipairs(entries) do
         local id = e.outID or e.r.output

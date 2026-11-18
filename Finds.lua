@@ -259,18 +259,41 @@ function Finds:Send(e, sp)
     PC.Share:SendRaw(msg)
 end
 
+-- Every trainer list you know, your own visits and what other players sent: [key][prof] = { [norm] = t }
+function Finds:TrainerKeys()
+    local out = {}
+    local function addAll(all)
+        for prof, list in pairs(all or {}) do
+            for norm, t in pairs(list) do
+                if t.trainer and t.name then
+                    out[t.trainer] = out[t.trainer] or {}
+                    out[t.trainer][prof] = out[t.trainer][prof] or {}
+                    out[t.trainer][prof][norm] = t
+                end
+            end
+        end
+    end
+    addAll(self:Trainers())
+    addAll(PC.ToLearn and PC.ToLearn.Data().trainer) -- (your own visit wins)
+    return out
+end
+
 -- A trainer's list, once a day per trainer
 function Finds:ShareTrainer(key)
     if not key or not PC.Share or not PC.Share.SendRaw or not PC.ToLearn then return end
     self.trainerSent = self.trainerSent or {}
     if self.trainerSent[key] and time() - self.trainerSent[key] < 86400 then return end
     self.trainerSent[key] = time()
-    local d = PC.ToLearn.Data()
-    for prof, list in pairs(d.trainer or {}) do
+    self:SendTrainer(key, self:TrainerKeys()[key])
+end
+
+function Finds:SendTrainer(key, profs)
+    if not key or not profs or not PC.Share or not PC.Share.SendRaw then return end
+    for prof, list in pairs(profs) do
         local head = ("T|%s|%s|%s|"):format(PC:Faction(), Clean(key), Clean(prof))
         local parts, len = {}, #head
         for _, t in pairs(list) do
-            if t.trainer == key and t.name then
+            if t.name then
                 local piece = ("%s~%s~%s~%s"):format(Clean(t.name), N(t.skill), N(t.level), N(t.cost))
                 if len + #piece + 1 > self.MAX_LEN then
                     PC.Share:SendRaw(head .. table.concat(parts, "^"))
@@ -323,9 +346,16 @@ function Finds:OnMessage(kind, faction, rest, who)
     end
 end
 
--- Pass a few finds on now and then, so players who weren't on when they were found still get them
+-- Pass a few finds (and one trainer's list) on now and then, so players who weren't on when they were
+-- found still get them
 function Finds:Gossip()
     if not PC.Share or not PC.Share.SendRaw or not PC.db then return end
+    local lists, tkeys = self:TrainerKeys(), {}
+    for k in pairs(lists) do tkeys[#tkeys + 1] = k end
+    if #tkeys > 0 then
+        local k = tkeys[math.random(#tkeys)]
+        self:SendTrainer(k, lists[k])
+    end
     local keys = {}
     for k in pairs(self:Table()) do keys[#keys + 1] = k end
     for _ = 1, math.min(self.GOSSIP_N, #keys) do
