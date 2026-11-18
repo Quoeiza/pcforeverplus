@@ -2814,8 +2814,9 @@ function UI:UpdateRecipeRows()
             if e.r.qty and e.r.qty ~= 1 then
                 makes = makes .. (" |cff888888x%s|r"):format(e.r.qty % 1 == 0 and tostring(e.r.qty) or ("%.1f"):format(e.r.qty))
             end
-            if e.ahFlip then makes = makes .. " |cff40c0ff(auction flip)|r" end -- (not a craft: bought on the AH, sold to a vendor)
-            FitCell(row.name, ("|cffffffff%s|r%s"):format(e.r.name, makes)) -- white: grey looked "unavailable"; the arrows show skill-ups
+            -- white: grey looked "unavailable"; the arrows show skill-ups. An AH flip (not a craft: bought on
+            -- the AH, sold to a vendor) in light blue: its tooltip says what it is
+            FitCell(row.name, ("|cff%s%s|r%s"):format(e.ahFlip and "40c0ff" or "ffffff", e.r.name, makes))
             SetSkillArrows(row, e.r.diff)
             row.shop:SetShown(not e.ahFlip) -- (an AH flip isn't a recipe: clicking it buys it)
             row.quick:SetShown(not e.ahFlip)

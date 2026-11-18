@@ -57,6 +57,7 @@ News.NOTES_FOREVER = {
         "Clicking a recipe while the Auction House is open opens its listings there, ready to buy. Shift-click does the same in the other tables. 0.3.0 only searched by name, and needed Shift held.",
         "A Refresh button on each recipe reads that recipe's price, listings and materials from the Auction House straight away, without a full scan. It sits at the right end of the row with Quick Buy and Add to plan.",
         "Each tab starts in the order that matters there: Total Auction Profit on All professions and each profession, Total Vendor Profit on Vendor flips, and best bet order on Best bets, which has a Best bet order button to sort again. The line under the table says how it's sorted.",
+        "Auction flips on Vendor flips show their name in light blue instead of an \"(auction flip)\" tag that got cut off. Their tooltip still says what they are.",
         "Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.",
         "Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.",
         "Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.",
