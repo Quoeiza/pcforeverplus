@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.0" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.1" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
@@ -1407,10 +1407,21 @@ function PC:BeginScan(mode, auto)
 end
 
 function PC:EndScan(ok, chatMsg, barMsg)
+    -- one recipe's refresh (its Refresh button): only its own items' live listings, and none of a full
+    -- scan's afterwards (no scan time, alerts or price share)
+    local q = self.quick
+    local refresh = (q and q.refresh) or self.refreshing
     -- After a good quick scan, read the live listings for your materials before finishing
     if ok and self.scanMode == "quick" and self.Depth and self.Depth:ShouldRun() then
-        local ids = self.Depth:ScanIDs()
+        local ids
+        if refresh then
+            ids = {}
+            for _, id in ipairs(q and q.items or {}) do if self:IsCommodity(id) then ids[#ids + 1] = id end end
+        else
+            ids = self.Depth:ScanIDs()
+        end
         if #ids > 0 then
+            self.refreshing = refresh
             self.quick = nil
             self.scanMode = "depth"
             self.progress = 0
@@ -1423,6 +1434,11 @@ function PC:EndScan(ok, chatMsg, barMsg)
             return
         end
     end
+    self.refreshing = nil
+    if refresh and ok then
+        chatMsg = ("Refreshed %s: its price, listings and materials are up to date."):format(refresh)
+        barMsg = ("%s refreshed."):format(refresh)
+    end
     if self.scanMode == "depth" and self.Depth then
         local depth = self.Depth
         self.scanMode = nil
@@ -1431,17 +1447,48 @@ function PC:EndScan(ok, chatMsg, barMsg)
     self.scanning, self.processing = false, false
     self.scanMode = nil
     self.quick = nil
-    if ok then db.scanTime[self:Faction()] = time() end
+    if ok and not refresh then db.scanTime[self:Faction()] = time() end
     Print(chatMsg)
-    if ok then
+    if ok and not refresh then
         local n = self:ReportAlerts()
         if n > 0 then barMsg = barMsg .. (" %d tip%s in chat."):format(n, n == 1 and "" or "s") end
     end
     if self.UI then self.UI:ScanFinished(ok, barMsg) end
-    if ok and self.Share then
+    if ok and self.Share and not refresh then
         C_Timer.After(2, function() self.Share:Broadcast("scan") end)
     end
     self:RefreshUI()
+end
+
+-- Refresh one recipe (its Refresh button): the scan's own price and listed-count read for just what it
+-- makes and what it's made from (and what goes into a material you make), then their live listings.
+-- name: what's said when it's done.
+function PC:RefreshItems(ids, name)
+    if not self.ahOpen then return Print("Open the Auction House to refresh " .. (name or "it") .. ".") end
+    if self.scanning then return Print("A scan is running: it refreshes everything.") end
+    if not (C_AuctionHouse and C_AuctionHouse.SearchForItemKeys and C_AuctionHouse.MakeItemKey) or #ids == 0 then return end
+    self.quick = { items = ids, pos = 0, found = 0, missed = 0, refresh = name or "it" }
+    self:BeginScan("quick")
+    self.progress = 0
+    self:ScanStep(self.QuickNextBatch)
+end
+
+-- What a recipe's refresh reads: what it makes, its materials (the ones it's priced with), and what goes
+-- into a material you make yourself
+function PC:RefreshIDs(e)
+    local set, ids = {}, {}
+    local function add(id) if id and not set[id] then set[id] = true; ids[#ids + 1] = id end end
+    if e.ahFlip then add(e.ahFlipID) return ids end
+    add(e.outID or (e.r and e.r.output))
+    for _, rg in ipairs(e.r and e.r.reagents or {}) do
+        local id, _, src = self:ReagentFor(rg, e.mats)
+        add(id)
+        if src == "Craft" then
+            local _, sr = self:RecipeFor(id)
+            for _, sg in ipairs(sr and sr.reagents or {}) do add((self:ReagentFor(sg, "low"))) end
+        end
+    end
+    return ids
 end
 
 -- Default scan: only the items your recipes make and the materials they use

@@ -1,6 +1,6 @@
 # ProfitCrafter Forever Plus
 
-Version 0.4.0. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
+Version 0.4.1. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
 The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
@@ -61,6 +61,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 ### Tables and tooltips
 
 - Clicking a recipe while the Auction House is open opens its listings there, ready to buy. Shift-click does the same in the other tables. 0.3.0 only searched by name, and needed Shift held.
+- A Refresh button on each recipe, beside Quick Buy and the bag, reads that recipe's price, listings and materials from the Auction House straight away, without a full scan.
 - Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.
 - Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.
 - Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.

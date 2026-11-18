@@ -52,6 +52,7 @@ News.NOTES_FOREVER = {
         "Your own scan of an item beats prices shared by other players for a minute.",
         "New \"Use what's in my bank\" setting, on by default. Turned off, the bank is ignored completely: nothing in it is counted, taken out or stored.",
         "Clicking a recipe while the Auction House is open opens its listings there, ready to buy. Shift-click does the same in the other tables. 0.3.0 only searched by name, and needed Shift held.",
+        "A Refresh button on each recipe, beside Quick Buy and the bag, reads that recipe's price, listings and materials from the Auction House straight away, without a full scan.",
         "Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.",
         "Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.",
         "Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.",

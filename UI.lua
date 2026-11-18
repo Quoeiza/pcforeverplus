@@ -908,6 +908,31 @@ local function ShopButton(parent, size)
 end
 UI.ShopButton = ShopButton
 
+-- Refresh: this one recipe's prices and listings, read from the Auction House now (not a full scan)
+local function RefreshButton(parent, size)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(size, size)
+    b.tex = b:CreateTexture(nil, "ARTWORK")
+    b.tex:SetAllPoints()
+    -- the AH's own circular arrow where the game has it, else a plain icon
+    local atlas = C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo("UI-RefreshButton") and b.tex.SetAtlas
+    if not (atlas and pcall(b.tex.SetAtlas, b.tex, "UI-RefreshButton")) then b.tex:SetTexture("Interface\\Buttons\\UI-RefreshButton") end
+    local hl = b:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 1, 1, 0.25)
+    b:SetScript("OnClick", function(btn)
+        local e = btn.getEntry and btn.getEntry()
+        if e then PC:Safe("refresh", PC.RefreshItems, PC, PC:RefreshIDs(e), e.r and e.r.name) end
+    end)
+    b:SetScript("OnEnter", function(btn)
+        ShowTooltip(btn, { "Refresh", "Reads this recipe's price, listings and materials from the Auction House now, without a full scan.",
+            PC.ahOpen and "" or "|cff888888Open the Auction House first.|r" })
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return b
+end
+UI.RefreshButton = RefreshButton
+
 -- Quick Buy: the crafts that make your minimum profit go in the plan, the main AH material is bought
 -- in the same click, and the plan opens for the rest
 local function QuickButton(parent, size)
@@ -2333,13 +2358,16 @@ function UI:CreateRecipesPage(p)
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
         SkillArrows(row, 30)
-        row.name = RowText(row, 46, C.name.w - 46 - 48)
+        row.name = RowText(row, 46, C.name.w - 46 - 70)
         row.shop = ShopButton(row, 18)
         row.shop:SetPoint("LEFT", C.name.w - 22, 0)
         row.shop.getEntries = function() return row.entry and { row.entry } or {} end
         row.quick = QuickButton(row, 18)
         row.quick:SetPoint("RIGHT", row.shop, "LEFT", -4, 0)
         row.quick.getEntry = function() return row.entry end
+        row.refresh = RefreshButton(row, 18)
+        row.refresh:SetPoint("RIGHT", row.quick, "LEFT", -4, 0)
+        row.refresh.getEntry = function() return row.entry end
         -- larger lettering to go with the taller rows (a value too wide for it gets the small one)
         row.name:SetFontObject(CELL_FONT)
         row.name.bigFont = CELL_FONT
