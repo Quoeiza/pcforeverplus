@@ -73,6 +73,7 @@ News.NOTES_FOREVER = {
         "Vendor purchases not in your bags within a second were bought again, up to three times.",
         "Vendor buying ignored plan changes made at the vendor, and kept offering items already bought.",
         "The plan priced large auction buys up the listings past what a vendor charges, instead of buying the rest from the vendor.",
+        "Vendor flips listed recipes that were only profitable at a material's single cheapest listing. A recipe now shows there only if its first craft makes your minimum profit at a vendor, with its materials at real listing prices.",
         "Make me gold multiplied the cheapest price by the count while the cost climbed the listings. It overstated profit and could pick batches that lose money.",
         "Stored live listings were used indefinitely, even after the item sold out or its price changed.",
         "Vendor sales only sold whole stacks. Extras and the rest of spare materials were left unsold and forgotten.",

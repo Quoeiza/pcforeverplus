@@ -2634,7 +2634,7 @@ function UI:UpdateRecipes()
             keep, meets = e.score ~= nil, true
         elseif vendorCat then
             keep = e.vendorProfit and e.vendorProfit > 0
-            meets = PC:MeetsMinV(e)
+            meets = PC:MeetsMinV(e) and PC:VendorFirstOK(e) -- (at real listing prices, not just the cheapest one)
         else
             keep = (self.category == "ALL" or e.r.prof == self.category)
             meets = PC:MeetsMinAH(e) or PC:MeetsMinV(e)

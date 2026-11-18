@@ -3029,6 +3029,15 @@ function PC:BatchProfit(e, n)
         routeIn and (n * routeIn - worth) or nil, spend
 end
 
+-- Does the first craft make the minimum profit sold to a vendor, its materials at real listing prices
+-- (yours first)? The cheapest listing alone can be one cheap item (Vendor flips go by this).
+function PC:VendorFirstOK(e)
+    local _, vIn = self:CraftIncome(e)
+    local _, vP = self:BatchProfit(e, 1)
+    if not (vIn and vP) then return false end
+    return vP > 0 and vP >= (vIn - vP) * self:MinProfitPct() / 100
+end
+
 -- minPct nil: Craftable at Profit: the crafts that make the minimum profit, each way (on the AH, to a
 -- vendor, the way it's sold), every craft priced as the batch climbs the listings; the way that lasts
 -- longest counts. minPct a number: only the way it's sold, at that share of its materials' cost
