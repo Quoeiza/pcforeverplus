@@ -1649,6 +1649,8 @@ local function TrainerProf()
     return nil
 end
 
+Travel.TrainerProf = TrainerProf
+
 -- an innkeeper's chat has the "make this inn your home" option
 local function IsInnkeeper()
     if C_GossipInfo and C_GossipInfo.GetOptions then

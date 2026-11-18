@@ -93,6 +93,8 @@ News.NOTES_FOREVER = {
         "Place, NPC and recipe names shared from clients in other languages showed in another alphabet. They are now translated or left out.",
         "Shared prices from a player whose clock ran fast blocked newer prices until that time passed.",
         "On newer clients, recipes read from the profession window lost their required materials, so Learn page profits came out too high.",
+        "Trainer windows were never read on WoW Forever, so a trainer recipe with no named trainer sent you to the nearest trainer of that profession, whether or not it teaches it. Trainer windows are now read, and a trainer you've visited is only suggested for what its window lists. A recipe the data lists only outside the cities is no longer swapped for a city trainer.",
+        "Goldthorn Tea is taught by Henry Stern in Razorfen Downs, and Smoked Desert Dumplings comes from the quest Sharing the Knowledge in Silithus. Both pointed to the city cooking trainers.",
         "The crafting station check errored on clients without C_TradeSkillUI, and the undercut check errored on clients without C_AuctionHouse when Auctionator was installed.",
     },
     wip = {

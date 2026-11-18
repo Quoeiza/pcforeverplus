@@ -46,12 +46,22 @@ function ToLearn:Norm(name)
     return n
 end
 
+-- Corrections to the generated recipe data, from WoW Forever sources (Icy Veins' Forever cooking guide)
+local DB_FIX = {
+    -- taught by Henry Stern in Razorfen Downs, not by the city cooking trainers
+    ["Cooking:goldthorn tea"] = { 175, 0, nil, "Trainer", nil, { { "Henry Stern", "Razorfen Downs", nil, nil, "" } } },
+    -- the reward for Sharing the Knowledge, from Calandrath in Cenarion Hold (not a trainer)
+    ["Cooking:smoked desert dumplings"] = { 285, 0, nil, "Quest", nil, { { "Sharing the Knowledge", "Silithus", 51.9, 39.2, "", { giver = "Calandrath" } } } },
+}
+for k, v in pairs(DB_FIX) do if PC.RecipeDB then PC.RecipeDB[k] = v end end
+
 local function Data()
     local cdb = PC.cdb
     cdb.toLearn = cdb.toLearn or {}
     local d = cdb.toLearn
     d.unlearned = d.unlearned or {}  -- [recipeID] = { name, prof, output, reagents, qty, src = {type, where, zone, cost, text} }
     d.trainer = d.trainer or {}      -- [prof] = { [norm] = { name, skill, level, cost, trainer = place key } }
+    d.taught = d.taught or {}        -- [trainer name, lower case] = { [norm] = true }: everything its window listed
     d.trip = d.trip or {}            -- { key, ... } in order
     d.skip = d.skip or {}            -- [key] = true: hidden by you
     return d
@@ -125,8 +135,11 @@ function ToLearn:NoteUnlearned(recipeID, info, prof)
 end
 
 -- A trainer's list: everything it teaches (including what you can't learn yet), skill, level, cost
-function ToLearn:ReadTrainer(trainerKey)
+function ToLearn:ReadTrainer(trainerKey, npcName)
     if not GetNumTrainerServices or not GetTrainerServiceInfo then return end
+    -- (WoW Forever gives no skill line for a recipe: the trainer's own profession then)
+    local trainerProf = PC.Travel and PC.Travel.TrainerProf and PC.Travel.TrainerProf() or nil
+    local taught = {}
     -- show everything for a moment (some filters hide what you can't learn yet), then put them back
     local filters = {}
     if GetTrainerServiceTypeFilter and SetTrainerServiceTypeFilter then
@@ -142,7 +155,7 @@ function ToLearn:ReadTrainer(trainerKey)
         local ok, name, _, kind = pcall(GetTrainerServiceInfo, i)
         if ok and name and kind ~= "header" then
             local line = GetTrainerServiceSkillLine and select(2, pcall(GetTrainerServiceSkillLine, i)) or nil
-            local prof = (type(line) == "string" and line ~= "") and line or nil
+            local prof = (type(line) == "string" and line ~= "") and line or trainerProf
             if prof then
                 local skill = GetTrainerServiceSkillReq and select(3, pcall(GetTrainerServiceSkillReq, i)) or nil
                 local level = GetTrainerServiceLevelReq and select(2, pcall(GetTrainerServiceLevelReq, i)) or nil
@@ -153,9 +166,11 @@ function ToLearn:ReadTrainer(trainerKey)
                 t.name, t.skill, t.level, t.cost, t.trainer = name, tonumber(skill), tonumber(level), tonumber(cost), trainerKey
                 t.used = kind == "used" or nil
                 d.trainer[prof][key] = t
+                taught[key] = true
             end
         end
     end
+    if npcName and next(taught) then d.taught[npcName:lower()] = taught; self:Changed() end
     if SetTrainerServiceTypeFilter then
         for f, on in pairs(filters) do pcall(SetTrainerServiceTypeFilter, f, on and 1 or 0) end
     end
@@ -397,7 +412,7 @@ function ToLearn:ListRaw()
                 if not t.used then
                     local place = t.trainer and PC.Places and PC.Places:Table()[t.trainer]
                     local near = trainerHere(prof)
-                    if near and not isHere(place) then place = near end
+                    if near and not isHere(place) and self:MayTeach(near.name, self:Norm(t.name)) then place = near end
                     add(prof, t.name, { skill = t.skill, level = t.level, source = "Trainer", cost = t.cost,
                         where = place and place.name or "Your trainer", zone = place and place.zone, place = place })
                 end
@@ -413,7 +428,7 @@ function ToLearn:ListRaw()
         if src.type and src.type ~= "Other" then
             local place
             if src.type == "Vendor" and src.where and PC.Places then place = PC.Places:Nearest("vendor", nil, src.where) end
-            if src.type == "Trainer" then place = self:NearestTrainer(u.prof) end
+            if src.type == "Trainer" then place = self:NearestTrainer(u.prof, u.name and self:Norm(u.name)) end
             add(u.prof, u.name, { recipeID = recipeID, source = src.type, where = src.where, zone = src.zone or (place and place.zone),
                 costText = src.cost, req = src.req, place = place, output = u.output, reagents = u.reagents, qty = u.qty, srcText = src.text })
         end
@@ -574,15 +589,53 @@ function ToLearn:ZoneMap(zone)
     return self.zoneMaps[zone:lower()]
 end
 
--- The nearest trainer of a profession you (or other players) have been to
-function ToLearn:NearestTrainer(prof)
+-- Could this trainer teach it? Not when you've read its list and the recipe isn't on it.
+function ToLearn:MayTeach(trainerName, norm)
+    local t = norm and trainerName and Data().taught[trainerName:lower()]
+    return not t or t[norm] == true
+end
+
+-- The nearest trainer of a profession you (or other players) have been to, one that may teach `norm`
+function ToLearn:NearestTrainer(prof, norm)
     if not PC.Places or not prof then return nil end
     -- (asked for hundreds of recipes at once: once per profession while the list is worked out)
     local c = self.trainerCache
-    if c and c[prof] ~= nil then return c[prof] or nil end
-    local best, _, other = PC.Places:Nearest("trainer", nil, nil, function(p) return ToLearn.TeachesProf(p, prof) end)
-    if c then c[prof] = best or other or false end
+    local p
+    if c and c[prof] ~= nil then p = c[prof] or nil
+    else
+        local best, _, other = PC.Places:Nearest("trainer", nil, nil, function(q) return ToLearn.TeachesProf(q, prof) end)
+        p = best or other
+        if c then c[prof] = p or false end
+    end
+    if not p or self:MayTeach(p.name, norm) then return p end
+    -- its list doesn't have it: the nearest one that may
+    local best, _, other = PC.Places:Nearest("trainer", nil, nil, function(q)
+        return ToLearn.TeachesProf(q, prof) and ToLearn:MayTeach(q.name, norm)
+    end)
     return best or other
+end
+
+-- A trainer of this profession whose list you've read, without the recipe on it (`at`: only where you are)
+function ToLearn:Lacks(prof, norm, at)
+    if not PC.Places then return false end
+    for _, p in ipairs(PC.Places:OfKind("trainer")) do
+        if ToLearn.TeachesProf(p, prof) and not self:MayTeach(p.name, norm)
+            and (not at or (at.map and p.map == at.map) or (at.zone and p.zone == at.zone)) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Does the data list a trainer in a capital city? (a recipe listed only outside the cities, such as
+-- Henry Stern's in Razorfen Downs or a master trainer's, is taught only there)
+function ToLearn:CitySpot(spots)
+    local cities = PC.Travel and PC.Travel.CITIES
+    for _, sp in ipairs(spots) do
+        local map = sp[2] and sp[2] ~= "" and self:ZoneMap(sp[2])
+        if map and cities and cities[map] then return true end
+    end
+    return false
 end
 
 -- "runecloth belt" -> "Runecloth Belt" (small words stay small: "Elixir of the Sages")
@@ -708,29 +761,36 @@ function ToLearn:FromDB(prof, name, at)
     if kind == "Trainer" then
         -- a trainer you've been to, or the nearest one the data knows (one where you are first)
         f.where = prof .. " trainer"
-        -- not one listed in the city you're in: any trainer of that profession there teaches it too
-        -- (never sent to another city to train when there's a trainer right where you are)
-        if here and not (first and first[2] == here) then
-            for _, sp in ipairs(self:TrainerSpots(prof)) do
-                if sp[2] == here then first = sp break end
+        local norm = self:Norm(name)
+        local p
+        -- the city trainers of a profession teach the same; one listed only outside the cities teaches
+        -- it alone (and a trainer whose list you've read teaches only what's on it)
+        if #spots == 0 or self:CitySpot(spots) then
+            -- not one listed in the city you're in: any trainer of that profession there teaches it too
+            -- (never sent to another city to train when there's a trainer right where you are)
+            if here and not (first and first[2] == here) then
+                for _, sp in ipairs(self:TrainerSpots(prof)) do
+                    if sp[2] == here and self:MayTeach(sp[1], norm) then first = sp break end
+                end
             end
-        end
-        local p = self:NearestTrainer(prof)
-        if first and here and first[2] == here then p = nil end -- the one here wins
-        local hereMap = at.map
-        if at.inCity == nil then
-            at.inCity = (hereMap and PC.Travel and ((PC.Travel.CITIES and PC.Travel.CITIES[hereMap])
-                or (PC.Travel.IsCityMap and PC.Travel:IsCityMap(hereMap)))) and true or false
-        end
-        local inCity = at.inCity
-        if p and here and p.map ~= hereMap and p.zone ~= here and inCity and not (first and first[2] == here) then
-            -- every city has every trainer: the one here (no arrow until you've been to it once)
-            f.where, f.zone = ("%s trainer here in %s"):format(prof, here), here
-            return f
-        end
-        if not p and inCity and not (first and first[2] == here) then
-            f.where, f.zone = ("%s trainer here in %s"):format(prof, here), here
-            return f
+            p = self:NearestTrainer(prof, norm)
+            if first and here and first[2] == here then p = nil end -- the one here wins
+            local hereMap = at.map
+            if at.inCity == nil then
+                at.inCity = (hereMap and PC.Travel and ((PC.Travel.CITIES and PC.Travel.CITIES[hereMap])
+                    or (PC.Travel.IsCityMap and PC.Travel:IsCityMap(hereMap)))) and true or false
+            end
+            local hereOK = at.inCity and not (first and first[2] == here) and not self:Lacks(prof, norm, at)
+            if hereOK and (not p or (here and p.map ~= hereMap and p.zone ~= here)) then
+                -- every city has every trainer: the one here (no arrow until you've been to it once)
+                f.where, f.zone = ("%s trainer here in %s"):format(prof, here), here
+                return f
+            end
+            if not p and not first and self:Lacks(prof, norm) then
+                -- the trainers you've read don't teach it, and the data names none
+                f.where = "Unknown trainer"
+                f.text = "Not taught by the trainers you've visited, and the data names no other."
+            end
         end
         if p then f.place, f.zone, f.where = p, p.zone, p.name or f.where
         elseif first then
@@ -1724,12 +1784,14 @@ ev:SetScript("OnEvent", function(_, event, a1)
         end
         if event == "TRAINER_SHOW" then
             local key
+            local npc = UnitName and UnitName("npc") or nil
             if PC.Places then
-                local npc = UnitName and UnitName("npc") or "Trainer"
                 local map = PC.Places:Here()
-                key = PC.Places.Key and PC.Places.Key("trainer", map, 0, 0, npc) or nil
+                key = PC.Places.Key and PC.Places.Key("trainer", map, 0, 0, npc or "Trainer") or nil
             end
-            ToLearn:ReadTrainer(key)
+            ToLearn:ReadTrainer(key, npc)
+            -- again once its list has surely loaded (it can still be empty as the window opens)
+            C_Timer.After(0.5, function() PC:Safe("trainer list", ToLearn.ReadTrainer, ToLearn, key, npc) end)
         elseif event == "PLAYER_LOGIN" then
             -- holidays: the calendar loads its events, then a look (and every half hour: one may start)
             if C_Calendar and C_Calendar.OpenCalendar then pcall(C_Calendar.OpenCalendar) end
