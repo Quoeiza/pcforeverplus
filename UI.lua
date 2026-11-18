@@ -474,7 +474,7 @@ local ShowTooltip -- defined below; the column headers use it on hover
 -- over it). Click sorts by that column, click again reverses. Each table keeps its sort (PC.db.sorts).
 ---------------------------------------------------------------------------
 -- where each table starts: names A-Z, numbers biggest first; nil = the order it comes in
-UI.SORT_DEFAULTS = { recipes = { "profit", -1 }, plan = { "name", 1 }, items = { "status", 1 }, history = { "t", -1 }, recent = { "t", -1 } }
+UI.SORT_DEFAULTS = { recipes = { "totalAH", -1 }, plan = { "name", 1 }, items = { "status", 1 }, history = { "t", -1 }, recent = { "t", -1 } }
 -- the scroll position that goes back to the top when a table's sort changes
 local SORT_OFFSET = { recipes = "offset", plan = "planOffset", mats = "shopOffset", items = "itemOffset",
     sell = "sellOffset", learn = "learnOffset", history = "historyOffset" }
@@ -1131,7 +1131,7 @@ function UI:Create()
     UI.W = W + NAV
     -- the Recipes list opens on All professions: a sort Best bets or Vendor flips picked doesn't carry over
     local rs = self:SortState("recipes")
-    if rs.auto then rs.key, rs.dir, rs.auto = "profit", -1, nil end
+    if rs.auto then rs.key, rs.dir, rs.auto = "totalAH", -1, true end
 
     local usePortrait = HasTemplate("PortraitFrameTemplate")
     local f = CreateFrame("Frame", "ProfitCrafterFrame", UIParent,
@@ -2280,14 +2280,11 @@ function UI:CreateRecipesPage(p)
         b:SetScript("OnClick", function(btn)
             UI.category = btn.value
             UI.offset = 0
+            -- each tab starts in its own order: best bets most likely gold first, vendor flips the biggest
+            -- Total Vendor Profit, the rest the biggest Total Auction Profit
             local s = UI:SortState("recipes")
-            if btn.value == "BEST" then
-                s.key, s.dir, s.auto = "score", -1, true          -- best bets start in "most likely gold" order
-            elseif btn.value == "VENDOR" then
-                s.key, s.dir, s.auto = "vendorProfit", -1, true   -- vendor flips start biggest V Profit first
-            elseif s.auto then
-                s.key, s.dir, s.auto = "profit", -1, nil          -- (a sort you picked yourself stays)
-            end
+            s.key = (btn.value == "BEST" and "score") or (btn.value == "VENDOR" and "totalV") or "totalAH"
+            s.dir, s.auto = -1, true
             UI:Redraw()
         end)
         b:Hide()
@@ -2309,6 +2306,7 @@ function UI:CreateRecipesPage(p)
         { "craftable", "Craftable at Profit", 64, "How many you can craft at your minimum profit, at auction or to a vendor (whichever is more), with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. ~ = a material has no live listings.", fit = "num" },
         { "totalAH", "Total Auction Profit", 84, "Auction Profit for the crafts making your minimum profit at auction, the whole batch at live listing prices.", fit = "gold" },
         { "totalV", "Total Vendor Profit", 84, "Vendor Profit for the crafts making your minimum profit at a vendor, priced the same way.", fit = "gold" },
+        { nil, nil, 70 }, -- Quick Buy, Add to plan, Refresh
     }
     cols.font = CELL_FONT
     self.recipeCols = cols
@@ -2358,15 +2356,17 @@ function UI:CreateRecipesPage(p)
         row.icon:SetSize(22, 22)
         row.icon:SetPoint("LEFT", 4, 0)
         SkillArrows(row, 30)
-        row.name = RowText(row, 46, C.name.w - 46 - 70)
-        row.shop = ShopButton(row, 18)
-        row.shop:SetPoint("LEFT", C.name.w - 22, 0)
-        row.shop.getEntries = function() return row.entry and { row.entry } or {} end
+        row.name = RowText(row, 46, C.name.w - 46 - 4)
+        -- at the far right: Quick Buy, Add to plan, Refresh
+        local btnX = cols[#cols].x + 6
         row.quick = QuickButton(row, 18)
-        row.quick:SetPoint("RIGHT", row.shop, "LEFT", -4, 0)
+        row.quick:SetPoint("LEFT", btnX, 0)
         row.quick.getEntry = function() return row.entry end
+        row.shop = ShopButton(row, 18)
+        row.shop:SetPoint("LEFT", row.quick, "RIGHT", 4, 0)
+        row.shop.getEntries = function() return row.entry and { row.entry } or {} end
         row.refresh = RefreshButton(row, 18)
-        row.refresh:SetPoint("RIGHT", row.quick, "LEFT", -4, 0)
+        row.refresh:SetPoint("LEFT", row.shop, "RIGHT", 4, 0)
         row.refresh.getEntry = function() return row.entry end
         -- larger lettering to go with the taller rows (a value too wide for it gets the small one)
         row.name:SetFontObject(CELL_FONT)
@@ -2374,10 +2374,12 @@ function UI:CreateRecipesPage(p)
         row.cell = {}
         for i2 = 2, #cols do
             local c = cols[i2]
-            local fs = RowText(row, c.x, c.w - 4, "RIGHT")
-            fs:SetFontObject(CELL_FONT)
-            fs.bigFont = CELL_FONT
-            row.cell[c[1]] = fs
+            if c[1] then -- (the last one holds the buttons)
+                local fs = RowText(row, c.x, c.w - 4, "RIGHT")
+                fs:SetFontObject(CELL_FONT)
+                fs.bigFont = CELL_FONT
+                row.cell[c[1]] = fs
+            end
         end
         row:SetScript("OnEnter", function(btn)
             local e = btn.entry
@@ -2552,7 +2554,22 @@ function UI:CreateRecipesPage(p)
         self.recipeRows[i] = row
     end
 
-    self.recipeCount = Text(lp, "GameFontDisableSmall", 10, LIST_Y - RECIPE_ROWS * ROW_H - 8, RW - 12)
+    self.recipeCount = Text(lp, "GameFontDisableSmall", 10, LIST_Y - RECIPE_ROWS * ROW_H - 8, RW - 150)
+    -- Best bets: back to best-bet order (after sorting by a column), with today's numbers
+    local resort = CreateFrame("Button", nil, lp, "UIPanelButtonTemplate")
+    resort:SetSize(130, 20)
+    resort:SetPoint("TOPRIGHT", lp, "TOPLEFT", RW, LIST_Y - RECIPE_ROWS * ROW_H - 3)
+    resort:SetText("Best bet order")
+    resort:SetScript("OnClick", function()
+        local s = UI:SortState("recipes")
+        s.key, s.dir, s.auto = "score", -1, true
+        UI.offset = 0
+        UI:Redraw()
+    end)
+    resort:SetScript("OnEnter", function(b) ShowTooltip(b, { "Best bet order", "Sorts the best bets again, most likely gold first, with the latest prices." }) end)
+    resort:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    resort:Hide()
+    self.bestResort = resort
     self.recipeCount:SetWordWrap(false)
 end
 
@@ -2749,8 +2766,12 @@ function UI:UpdateRecipes()
     UI.SortRows(data, s.key, s.dir, val, function(e) return e.r.name:lower() end)
     self.recipeData = data
     self:PaintHeaders(self.recipeHeaders, "recipes")
-    -- sorted by something that isn't a column: say so
-    self.sortNote = (s.key == "score" and "Sorted by best bet") or (s.key == "profit" and "Sorted by profit") or nil
+    -- how it's sorted, in words (a column by its name, highest or lowest first)
+    local label
+    for _, c in ipairs(self.recipeCols or {}) do if c[1] == s.key then label = c[2] end end
+    label = label or (s.key == "score" and "best bet") or (s.key == "profit" and "profit") or nil
+    self.sortNote = label and ("Sorted by %s%s"):format(label, (s.key == "score" or s.key == "name") and ""
+        or (s.dir == -1 and ", highest first" or ", lowest first")) or nil
 
     if not self.selected and data[1] then self.selected = data[1].id end
     self:UpdateRecipeRows()
@@ -2876,6 +2897,7 @@ function UI:UpdateRecipeRows()
     if nShown < nAll then hidden[#hidden + 1] = (nAll - nShown) .. " other expansions" end
     if #hidden > 0 then parts[#parts + 1] = "|cff888888hidden: " .. table.concat(hidden, ", ") .. "|r" end
     self.recipeCount:SetText(table.concat(parts, "  |cff666666·|r  "))
+    if self.bestResort then self.bestResort:SetShown(self.category == "BEST") end
 end
 
 ---------------------------------------------------------------------------

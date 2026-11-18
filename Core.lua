@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.1" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.2" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
