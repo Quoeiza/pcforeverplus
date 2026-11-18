@@ -660,7 +660,7 @@ local function ItemIcon(itemID)
     return icon or QUESTION
 end
 
-local CLICK_HINT = "|cff888888Shift-click: search the Auction House   Right-click: craft it   Shift-right-click: link in chat|r"
+local CLICK_HINT = "|cff888888Shift-click: open it at the Auction House   Right-click: craft it   Shift-right-click: link in chat|r"
 
 -- Tooltip: the game's own item tooltip (when we know the item), then ProfitCrafter's lines
 -- Which expansion an item comes from (the game's own names when it has them)
@@ -956,13 +956,40 @@ local function InsertIntoChat(link)
     return false
 end
 
--- Search the Auction House for exactly this item (switches the AH to its Buy page first)
+-- Open this item in the Auction House: straight to its listings, ready to buy (as Waylaid Auction Helper
+-- does on WoW Forever, through the AH's own "pick this result"). The game needs the item's details first
+-- (asking loads them) and the AH ready for another request: until then it waits, up to OPEN_WAIT seconds,
+-- then searches for it by name instead.
+UI.OPEN_WAIT = 2
 function UI:SearchAH(itemID)
     local ah = AuctionHouseFrame
     if not PC.ahOpen or not ah then
         PC.Print("Open the Auction House to search for " .. PC:ItemName(itemID) .. ".")
         return false
     end
+    local A = C_AuctionHouse
+    if not (ah.SelectBrowseResult and A and A.MakeItemKey and A.GetItemKeyInfo) then return self:SearchAHByName(itemID) end
+    local key = A.MakeItemKey(itemID)
+    local token = {}
+    self.openToken = token -- (a newer click wins)
+    local deadline = GetTime() + self.OPEN_WAIT
+    local function try()
+        if self.openToken ~= token or not PC.ahOpen then return end
+        local ready = not A.IsThrottledMessageSystemReady or A.IsThrottledMessageSystemReady()
+        if ready and A.GetItemKeyInfo(key) and pcall(ah.SelectBrowseResult, ah, { itemKey = key, minPrice = 0, totalQuantity = 0 }) then
+            self.openToken = nil
+            return
+        end
+        if GetTime() < deadline then C_Timer.After(0.2, try) else self.openToken = nil; self:SearchAHByName(itemID) end
+    end
+    try()
+    return true
+end
+
+-- Search the Auction House for exactly this item (switches the AH to its Buy page first)
+function UI:SearchAHByName(itemID)
+    local ah = AuctionHouseFrame
+    if not PC.ahOpen or not ah then return false end
     local name = PC:ItemName(itemID)
     if ah.SetDisplayMode and AuctionHouseFrameDisplayMode and AuctionHouseFrameDisplayMode.Buy then
         pcall(ah.SetDisplayMode, ah, AuctionHouseFrameDisplayMode.Buy)
@@ -2432,7 +2459,7 @@ function UI:CreateRecipesPage(p)
             for _, line in ipairs(PC:SalesTooltip(e.outID or e.r.output)) do tip[#tip + 1] = line end
             tip[#tip + 1] = " "
             for _, l in ipairs(PC:DepthLines(e.outID or e.r.output)) do tip[#tip + 1] = l end
-            tip[#tip + 1] = "|cff888888Click: search the Auction House   Double-click: how many   Right-click: craft it   Shift-right-click: link|r"
+            tip[#tip + 1] = "|cff888888Click: open it at the Auction House   Double-click: how many   Right-click: craft it   Shift-right-click: link|r"
             ShowTooltip(btn, tip, e.outID or e.r.output)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)

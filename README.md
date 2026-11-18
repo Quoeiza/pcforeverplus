@@ -57,7 +57,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 
 ### Tables and tooltips
 
-- Clicking a recipe while the Auction House is open searches for it there. 0.3.0 needed Shift held.
+- Clicking a recipe while the Auction House is open opens its listings there, ready to buy. Shift-click does the same in the other tables. 0.3.0 only searched by name, and needed Shift held.
 - Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.
 - Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.
 - Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.

@@ -911,7 +911,7 @@ function UI:CreateSellPage(p)
             if it.vendor then tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. It pays more than the Auction House after its cut and deposit.|r" end
             if it.tooCheap then tip[#tip + 1] = "|cffff8040It sells for under 1s at auction: not worth posting.|r"
             elseif it.hold then tip[#tip + 1] = "|cffff8040Auction prices are below your cost right now: holding it.|r" end
-            tip[#tip + 1] = "|cff888888Shift-click: search the Auction House   Alt-click: price alert|r"
+            tip[#tip + 1] = "|cff888888Shift-click: open it at the Auction House   Alt-click: price alert|r"
             ShowTooltip(r, tip, it.id)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)

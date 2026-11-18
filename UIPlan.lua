@@ -636,7 +636,7 @@ function UI:CreateShoppingPage(p)
                 lines[#lines + 1] = note.kind == "upgrade" and ("|cff40ff40Upgrade:|r " .. what) or ("|cffffd100Suggestion:|r " .. what .. ", your call")
                 if changes ~= "" then lines[#lines + 1] = changes end
             end
-            lines[#lines + 1] = "|cff888888Right-click: craft it   Shift-click: search the Auction House   Alt-click: vendor / auction|r"
+            lines[#lines + 1] = "|cff888888Right-click: craft it   Shift-click: open it at the Auction House   Alt-click: vendor / auction|r"
             ShowTooltip(r, lines, e.outID or e.r.output)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
