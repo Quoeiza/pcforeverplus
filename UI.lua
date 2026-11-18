@@ -2177,7 +2177,7 @@ function UI:CraftableLines(e)
 end
 
 -- A recipe's ingredients for one craft and what each costs (the way it's priced): a tooltip paragraph
-UI.SRC_TEXT = { AH = "Auction House, cheapest listing", Vendor = "what a vendor charges, after Bartering", Craft = "cheaper to make yourself",
+UI.SRC_TEXT = { AH = "Auction House listings", Vendor = "what a vendor charges, after Bartering", Craft = "cheaper to make yourself",
     Disenchant = "disenchanting a crafted green (an estimate: yields vary)" }
 function UI:IngredientLines(r, mats)
     local out = { " ", "|cffffd100Ingredients for one craft:|r" }
@@ -2246,7 +2246,7 @@ function UI:CreateRecipesPage(p)
     HeaderStrip(lp)
     local cols = {
         { "name", "Name", nil, "The arrows show the chance of a skill-up.", text = true },
-        { "cost", "Materials", 76, "Material cost of one craft, each from its cheapest source: the Auction House, a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
+        { "cost", "Materials", 76, "Material cost of one craft, each from its cheapest source: the Auction House (up the real listings, as the cheapest may not have enough), a vendor (after Bartering) or making it yourself. The recipe's tooltip lists every ingredient. Auction House flips: the auction price of one.", fit = "money" },
         { "sell", "Sells at auction", 68, "What one craft's output sells for at auction, at the cheapest listing.", fit = "money" },
         { "vendorSell", "Sells at vendor", 68, "What a vendor pays you for one craft's output. Orange: not confirmed yet (sell one to a vendor to confirm it).", fit = "money" },
         { "ahProfit", "Auction Profit", 80, "Profit per craft selling at auction, after its 5% cut.", fit = "money" },
@@ -2634,7 +2634,7 @@ function UI:UpdateRecipes()
             keep, meets = e.score ~= nil, true
         elseif vendorCat then
             keep = e.vendorProfit and e.vendorProfit > 0
-            meets = PC:MeetsMinV(e) and PC:VendorFirstOK(e) -- (at real listing prices, not just the cheapest one)
+            meets = PC:MeetsMinV(e)
         else
             keep = (self.category == "ALL" or e.r.prof == self.category)
             meets = PC:MeetsMinAH(e) or PC:MeetsMinV(e)

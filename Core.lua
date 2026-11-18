@@ -2661,7 +2661,7 @@ function PC:BestReagent(rg, depth)
     local bestID, bestCost, bestSrc
     local buyOnly = self:BuyOnly()
     for _, id in ipairs(self:ReagentIDs(rg)) do
-        local c, src = self:UnitCost(id)
+        local c, src = self:UnitCostFor(id, rg.n)
         local cc = (not buyOnly[id]) and self:CraftCost(id, depth) or nil
         if cc and (not c or cc < c) then c, src = cc, "Craft" end
         -- dust/essence/shards: craft a green you know and disenchant it, when that's cheaper
@@ -2694,6 +2694,17 @@ function PC:UnitCost(itemID)
     if v and (not ah or v <= ah) then return v, "Vendor" end
     if ah then return ah, "AH" end
     return nil
+end
+
+-- The same for one craft's worth (n): bought up the real listings, the vendor after them. The cheapest
+-- listing can be a single cheap item, so n of it can cost far more than n times its price.
+function PC:UnitCostFor(itemID, n)
+    local c, src = self:UnitCost(itemID)
+    if src == "AH" and n and n > 1 then
+        local total = self:EffectiveCost(itemID, n)
+        if total and total > 0 then c = total / n end
+    end
+    return c, src
 end
 
 ---------------------------------------------------------------------------
@@ -3027,15 +3038,6 @@ function PC:BatchProfit(e, n)
     local ahIn, vIn, routeIn = self:CraftIncome(e)
     return ahIn and (n * ahIn - worth) or nil, vIn and (n * vIn - worth) or nil,
         routeIn and (n * routeIn - worth) or nil, spend
-end
-
--- Does the first craft make the minimum profit sold to a vendor, its materials at real listing prices
--- (yours first)? The cheapest listing alone can be one cheap item (Vendor flips go by this).
-function PC:VendorFirstOK(e)
-    local _, vIn = self:CraftIncome(e)
-    local _, vP = self:BatchProfit(e, 1)
-    if not (vIn and vP) then return false end
-    return vP > 0 and vP >= (vIn - vP) * self:MinProfitPct() / 100
 end
 
 -- minPct nil: Craftable at Profit: the crafts that make the minimum profit, each way (on the AH, to a
@@ -3390,7 +3392,7 @@ function PC:ReagentFor(rg, mode)
     local ranked = self:RankedReagentIDs(rg)
     if mode == "high" and #ranked > 1 then
         local id = ranked[#ranked]
-        local c, src = self:UnitCost(id)
+        local c, src = self:UnitCostFor(id, rg.n)
         return id, c, src, #ranked
     end
     local id, c, src = self:BestReagent(rg)
