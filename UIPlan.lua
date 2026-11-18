@@ -438,7 +438,7 @@ function UI:MainAHMaterial(e, crafts)
     local list = PC:CombinedShoppingList({ setmetatable({ planCount = crafts }, { __index = e }) }, 1)
     local best, bestSpend
     for _, it in ipairs(list or {}) do
-        if (it.buy or 0) > 0 and it.src ~= "Vendor" and not it.craft and not it.tool and PC.Buy:CanBuy(it.id)
+        if (it.buy or 0) > 0 and it.src ~= "Vendor" and (not it.craft or it.craft.fromOwn) and not it.tool and PC.Buy:CanBuy(it.id)
             and PC.Buy:AHQty(it.id, it.buy) > 0 then
             local spend = it.sub or ((it.unit or 0) * it.buy)
             if not best or spend > bestSpend then best, bestSpend = it, spend end
@@ -1576,14 +1576,18 @@ function UI:FillShopRows(list)
                 row.have:SetText(it.have)
             end
             local buyState = PC.Buy:StateFor(it.id)
-            if it.craft then
+            if it.craft and it.craft.fromOwn and (it.buy or 0) > 0 then
+                -- some made from your materials, the rest bought: the Buy column is what's bought
+                row.buy:SetText("|cffffd100" .. it.buy .. "|r")
+                row.total:SetText(PC:Money(it.sub, false, true) .. (" |cff40c0ff(+ make %d from yours)|r"):format(it.craft.n))
+            elseif it.craft then
                 if it.craft.disenchant then
                     -- short in the Buy column; the Total column says which green to make and disenchant
                     row.buy:SetText(("|cffc080ffDE %d|r"):format(it.craft.n))
                     row.total:SetText(("|cffc080ff(make %d %s, disenchant)|r"):format(it.craft.n, it.craft.r.name or "a green"))
                 else
                     row.buy:SetText("|cff40c0ffmake " .. it.craft.n .. "|r")
-                    row.total:SetText("|cff40c0ff(craft it: cheaper than buying)|r")
+                    row.total:SetText(it.craft.fromOwn and "|cff40c0ff(from your materials)|r" or "|cff40c0ff(craft it: cheaper than buying)|r")
                 end
             elseif coming > 0 or buyState == "buying" then
                 -- sent to the AH, waiting for its answer: counted as had, said as being bought

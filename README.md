@@ -93,6 +93,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 
 ### Bags and crafting
 
+- The plan made what it could from materials you held even when buying the item was cheaper, such as linen worth 23c into a bandage you can buy for 10c. It now only does that when it saves gold. When it does, the materials row shows how many are still bought, not just "make N".
 - The plan's bag check ignored free slots in the reagent bag.
 - Vendor purchases and crafts came in smaller batches than your bags allowed, because the room freed by used-up materials wasn't counted.
 - The bank crashed with a stack overflow whenever an item was on the cursor.

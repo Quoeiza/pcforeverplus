@@ -3875,14 +3875,17 @@ function PC:CombinedShoppingListRaw(entries, crafts)
             local orid, or_ = self:RecipeFor(it.id)
             if or_ and or_.reagents and #or_.reagents > 0 then
                 local per = math.max(or_.qty or 1, 1)
-                local can = math.huge
+                local can, worth = math.huge, 0
                 for _, rg in ipairs(or_.reagents) do
-                    local bestID = self:ReagentFor(rg, "low")
+                    local bestID, u = self:ReagentFor(rg, "low")
                     local used = byID[bestID] and byID[bestID].need or 0
                     can = math.min(can, math.floor((self:ReagentCount(rg) - used) / math.max(rg.n, 1)))
+                    worth = worth + (u or 0) * rg.n
                 end
                 local n = math.min(can, math.ceil(short / per))
-                if n > 0 then rid, r, own = orid, or_, n end
+                -- only when it saves gold: your materials are worth less than buying what they make
+                -- (linen worth 23c isn't turned into a bandage you can buy for 10c)
+                if n > 0 and (not it.unit or worth / per < it.unit) then rid, r, own = orid, or_, n end
             end
         end
         if r then
