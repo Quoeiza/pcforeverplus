@@ -59,9 +59,13 @@ local function NoteUser(who, applied)
     if applied and applied > 0 then
         e.t, e.n, e.total = time(), applied, (e.total or 0) + applied
     end
-    -- keep the list short: drop people not heard from in 30 days
-    for name, x in pairs(u) do
-        if time() - (x.seen or 0) > 30 * 86400 then u[name] = nil end
+    -- keep the list short: drop people not heard from in 30 days (looked through once an hour, not
+    -- on every message: with thousands of users that was a loop over all of them each time)
+    if not Share.prunedAt or time() - Share.prunedAt > 3600 then
+        Share.prunedAt = time()
+        for name, x in pairs(u) do
+            if time() - (x.seen or 0) > 30 * 86400 then u[name] = nil end
+        end
     end
 end
 
@@ -199,6 +203,29 @@ end
 ---------------------------------------------------------------------------
 local queue, pumping = {}, false
 
+-- The channel's budget: every message reaches every ProfitCrafter user on it, so the traffic grows with
+-- the square of the users. Each one sends less the more of them are talking: CHANNEL_RATE messages a
+-- second between everyone heard in the last 15 minutes, so the total stays about the same with 50 users
+-- or 50,000 (and never faster than Blizzard's own limit, SEND_GAP).
+local CHANNEL_RATE = 2
+local TALK_WINDOW = 15 * 60
+function Share:Talkers()
+    local now = time()
+    if self.talkersAt and now - self.talkersAt < 60 then return self.talkers end
+    local n = 0
+    for _, e in pairs(self:Log().users) do if now - (e.seen or 0) < TALK_WINDOW then n = n + 1 end end
+    self.talkers, self.talkersAt = n, now
+    return n
+end
+-- seconds between your messages, and how many you may send in the next 15 minutes
+function Share:Gap() return math.max(SEND_GAP, (self:Talkers() + 1) / CHANNEL_RATE) end
+function Share:Budget() return math.max(1, math.floor(TALK_WINDOW / self:Gap())) end
+
+-- what's waiting of one kind is dropped when a newer one replaces it (fresh prices, a changed plan)
+local function DropQueued(kind)
+    for i = #queue, 1, -1 do if queue[i].kind == kind then table.remove(queue, i) end end
+end
+
 local function Channels()
     local list = {}
     local chan = Share:ChannelID()
@@ -225,13 +252,16 @@ local function Pump()
     end
     local m = table.remove(queue, 1)
     pcall(C_ChatInfo.SendAddonMessage, PREFIX, m.text, m.channel[1], m.channel[2])
-    C_Timer.After(SEND_GAP, Pump)
+    C_Timer.After(Share:Gap(), Pump)
 end
 
-local function Send(text)
+local function Send(text, kind)
     for _, ch in ipairs(Channels()) do
-        queue[#queue + 1] = { text = text, channel = ch }
+        queue[#queue + 1] = { text = text, channel = ch, kind = kind }
     end
+    -- more waiting than the budget sends in half an hour: the oldest goes (it's out of date by then)
+    local most = Share:Budget() * 2 + 10
+    while #queue > most do table.remove(queue, 1) end
     if not pumping and #queue > 0 then
         pumping = true
         Pump()
@@ -265,18 +295,22 @@ function Share:Broadcast(reason)
     local header = ("P|%s|%d|"):format(PC:Faction(), scanTime)
     local parts, len = {}, #header
     local sent = 0
+    -- no more than the channel's budget allows (the freshest prices first), and none still waiting from before
+    local most = self:Budget()
+    DropQueued("P")
     for _, it in ipairs(list) do
         local piece = ("%d:%d:%d"):format(it.id, it.p, it.q)
         if len + #piece + 1 > MAX_LEN then
-            Send(header .. table.concat(parts, ","))
+            Send(header .. table.concat(parts, ","), "P")
             sent = sent + 1
             parts, len = {}, #header
+            if sent >= most then break end
         end
         parts[#parts + 1] = piece
         len = len + #piece + 1
     end
-    if #parts > 0 then
-        Send(header .. table.concat(parts, ","))
+    if #parts > 0 and sent < most then
+        Send(header .. table.concat(parts, ","), "P")
         sent = sent + 1
     end
     self.lastShare = GetTime()
@@ -318,6 +352,99 @@ function Share:SharePlace(key, p)
         len = len + #id + 1
     end
     Send(head .. table.concat(body, ","))
+end
+
+---------------------------------------------------------------------------
+-- What your plan will put on the Auction House (crafts still to do, and what's made but not posted yet),
+-- told to other users so their advice can allow for it: C|faction|itemID:count,... (empty: nothing).
+-- Sent when it changes (at most every PLAN_MIN_GAP, longer while the channel is busy), again every
+-- PLAN_KEEP while it stands, and once more when it's gone. Vendor and disenchant recipes aren't sent:
+-- a vendor buys any amount. Once posted, it's in everyone's scans: it's no longer "coming".
+---------------------------------------------------------------------------
+Share.PLAN_MIN_GAP = 5 * 60
+Share.PLAN_KEEP = 60 * 60
+Share.PLAN_FOR = 2 * 3600 -- a player's plan not heard about for this long stops counting (gone quiet)
+
+function Share:MyComing()
+    local UI = PC.UI
+    -- (never works the recipes out just for this: only once the window or Task Button has)
+    if not (UI and UI.allEntries and UI.PlanEntries and PC:PlanForProfit()) then return nil end
+    local out = {}
+    for _, e in ipairs(UI:PlanEntries()) do
+        local id = e.outID or (e.r and e.r.output)
+        if id and e.route == "AH" and not e.sub then out[id] = (out[id] or 0) + (e.planCount or 0) * math.max(e.r.qty or 1, 1) end
+    end
+    for id, n in pairs(out) do out[id] = math.floor(n + (PC.BagCount and PC:BagCount(id) or 0) + 0.5) end
+    return out
+end
+
+function Share:AnnouncePlan()
+    if not self:Enabled() or not C_ChatInfo or not C_ChatInfo.SendAddonMessage or #Channels() == 0 then return end
+    local mine = self:MyComing()
+    if not mine then return end
+    local ids = {}
+    for id, n in pairs(mine) do if n > 0 then ids[#ids + 1] = id end end
+    table.sort(ids)
+    local parts, len = {}, 0
+    for _, id in ipairs(ids) do
+        local piece = id .. ":" .. mine[id]
+        if len + #piece + 1 > MAX_LEN - 20 then break end
+        parts[#parts + 1] = piece
+        len = len + #piece + 1
+    end
+    local body = table.concat(parts, ",")
+    local now, last = GetTime(), self.planSent
+    if last and last.body == body then
+        if body == "" or now - last.t < math.max(self.PLAN_KEEP, self:Gap()) then return end -- standing: now and then
+    elseif last and now - last.t < math.max(self.PLAN_MIN_GAP, self:Gap()) then return end -- changed: not too often
+    if not last and body == "" then return end -- nothing planned, nothing said yet
+    self.planSent = { body = body, t = now }
+    DropQueued("C")
+    Send(("C|%s|%s"):format(PC:Faction(), body), "C")
+end
+
+-- Plans heard from other users: db.coming[faction][player] = { t = when, items = { [itemID] = count } }
+function Share:Coming()
+    PC.db.coming = PC.db.coming or {}
+    local f = PC:Faction()
+    PC.db.coming[f] = PC.db.coming[f] or {}
+    return PC.db.coming[f]
+end
+
+function Share:HeardPlan(who, body)
+    local items = {}
+    for id, n in (body or ""):gmatch("(%d+):(%d+)") do items[tonumber(id)] = tonumber(n) end
+    self:Coming()[who] = next(items) and { t = time(), items = items } or nil
+    self.comingIndex = nil
+end
+
+-- What other users' plans will still put on the AH of an item, and how many players. Each player's
+-- counts for at most twice a day's sales (perDay): however big a claim, it can only say "well covered".
+-- (an index by item, rebuilt at most once a minute, so asking for every recipe costs next to nothing)
+function PC:ComingSupply(itemID, perDay)
+    local S = self.Share
+    if not S or not itemID or not self.db then return 0, 0 end
+    local now = time()
+    if not S.comingIndex or now - (S.comingIndexAt or 0) > 60 then
+        local index, all = {}, S:Coming()
+        for who, c in pairs(all) do
+            if now - (c.t or 0) > S.PLAN_FOR then all[who] = nil
+            else
+                for id, n in pairs(c.items or {}) do
+                    local l = index[id]
+                    if not l then l = {}; index[id] = l end
+                    l[#l + 1] = n
+                end
+            end
+        end
+        S.comingIndex, S.comingIndexAt = index, now
+    end
+    local l = S.comingIndex[itemID]
+    if not l then return 0, 0 end
+    local cap = math.max((perDay or 0) * 2, 20)
+    local total = 0
+    for _, n in ipairs(l) do total = total + math.min(n, cap) end
+    return math.floor(total + 0.5), #l
 end
 
 -- Something another part of ProfitCrafter shares (recipe finds, trainer lists): sent like the rest
@@ -467,6 +594,7 @@ function Share:OnMessage(text, sender)
         return
     end
 
+    if kind == "C" then return self:HeardPlan(who, rest) end
     if kind ~= "P" then return end
     local stamp, body = rest:match("^(%d+)|(.*)$")
     stamp = tonumber(stamp)
@@ -535,6 +663,8 @@ local function OnShareEvent(event, ...)
         end
         C_Timer.After(8, function() Share:JoinChannel() end)  -- join after the game's own channels
         C_Timer.After(20, function() Share:Request() end)     -- then ask everyone for newer prices
+        -- what your plan will put on the AH, told when it changes (a look once a minute: next to nothing)
+        if C_Timer.NewTicker then C_Timer.NewTicker(60, function() PC:Safe("plan sharing", Share.AnnouncePlan, Share) end) end
     elseif event == "CHAT_MSG_ADDON" then
         local prefix, text, _, sender = ...
         if prefix == PREFIX then Share:OnMessage(text, sender)

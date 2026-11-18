@@ -3609,6 +3609,9 @@ function PC:AnalyzeRaw()
                 potential = profit / 2                          -- the dust still has to sell
             elseif soldToday > 0 then
                 potential = profit * math.max(soldToday / per, 1)
+                -- other ProfitCrafter users' plans will put more on the AH: ranked lower, never under half
+                local coming = self:ComingSupply(outID, soldToday)
+                if coming > 0 then potential = potential * math.max(0.5, soldToday / (soldToday + coming)) end
             else
                 potential = profit / 3                          -- nothing to go on: be cautious
             end

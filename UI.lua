@@ -2455,6 +2455,16 @@ function UI:CreateRecipesPage(p)
             end
             tip[#tip + 1] = ("Sold today: |cffffffff%d|r%s"):format(e.soldToday or 0,
                 e.soldTodayKnown and "" or " |cff888888(not scanned today)|r")
+            -- what other ProfitCrafter users' plans will still put on the AH
+            if e.route == "AH" then
+                local perDay = PC.MakeGold and PC.MakeGold:SoldPerDay(e)
+                local coming, players = PC:ComingSupply(e.outID or e.r.output, perDay)
+                if coming > 0 then
+                    local days = perDay and perDay > 0 and ((e.listed or 0) + coming) / perDay
+                    tip[#tip + 1] = ("|cffffd100Coming from %d other ProfitCrafter user%s: %d, not listed yet.%s|r"):format(players,
+                        players == 1 and "" or "s", coming, days and (" With what's listed, about %.1f days of sales."):format(days) or "")
+                end
+            end
             tip[#tip + 1] = " "
             for _, line in ipairs(PC:SalesTooltip(e.outID or e.r.output)) do tip[#tip + 1] = line end
             tip[#tip + 1] = " "

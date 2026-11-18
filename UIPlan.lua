@@ -473,6 +473,11 @@ function UI:QuickBuy(e)
     local parts = {}
     parts[#parts + 1] = add > 0 and ("Quick Buy: added %d %s (%d planned), all that make %d%% profit."):format(add, e.r.name, plan[e.id], pct)
         or ("Quick Buy: %s already planned (%d); no more make %d%% profit."):format(e.r.name, cur, pct)
+    -- more than the market takes (its sales, what's listed, other ProfitCrafter users' plans): said, not stopped
+    local cap, capWhy = PC.MakeGold and PC.MakeGold:MarketCap(e)
+    if cap and (plan[e.id] or 0) > cap then
+        parts[#parts + 1] = ("|cffffd100The market takes about %d now (%s).|r"):format(cap, capWhy or "")
+    end
     if main and PC.ahOpen then parts[#parts + 1] = ("Buying %s now. Click Buy for the other materials."):format(main.name or "main material")
     elseif main then parts[#parts + 1] = "Open the Auction House to buy its materials."
     else parts[#parts + 1] = "Nothing to buy at auction: its materials come from vendors or your bags." end

@@ -159,6 +159,12 @@ function Gold:MarketCapRaw(e)
         local f = PC.Learn and PC.Learn:ShareFactor(id) or 1
         if f ~= 1 then items = items * f; why[#why + 1] = f < 1 and "often comes back unsold" or "always sells" end
         why[#why + 1] = ("~%d sell a day"):format(math.floor(perDay + 0.5))
+        -- other ProfitCrafter users' plans will put more on the AH: a smaller share, never under half
+        local coming, players = PC:ComingSupply(id, perDay)
+        if coming > 0 then
+            items = items * math.max(0.5, perDay / (perDay + coming))
+            why[#why + 1] = ("%d more coming from %d other ProfitCrafter user%s"):format(coming, players, players == 1 and "" or "s")
+        end
     end
     if listed and listed > 0 then
         local slice = listed * (PC.db.goldFlood or 20) / 100

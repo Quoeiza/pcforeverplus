@@ -21,6 +21,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold today.
 - New setting to only recommend auction recipes that sold today, on by default. A recipe with no sales today shows an orange 0 and a note in its tooltip.
 - Auction flips fill every column, are labelled as flips and have a fuller tooltip.
+- ProfitCrafter users share what their plans will put on the Auction House (crafts still to do, and items made but not yet posted), when a plan changes and again when it's gone. The advice allows for it but never blocks anything. The recipe tooltip says what's coming, Best bets ranks those recipes lower, and the "how many?" pop-up, Make me gold and Quick Buy suggest a smaller batch, never less than half. Vendor recipes aren't affected.
 
 ### Buying
 
@@ -125,6 +126,8 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 
 ## Performance
 
+- Sharing keeps to a budget for the whole channel. The more users are talking, the less each one sends, so traffic stays about the same with 50 users or 50,000. Price shares send the freshest prices first, within that budget.
+- The list of users heard from is tidied once an hour instead of on every message.
 - Faster auction scans. Each search asks for 100 items (was 25), results are read as soon as they are complete, live listings are read back to back, and listings that haven't changed in the last 2 hours aren't read again.
 - Much less work on each refresh. Your sales and purchases are indexed, bag slots and item info are read once, and sorting, searching and filtering no longer re-analyse every recipe. Tooltips are built when you hover.
 - The Learn list, route planning and nearest-place lookups do far less work. Routes keep their fixed part between uses and only search the current continent.
