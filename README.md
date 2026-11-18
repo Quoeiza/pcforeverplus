@@ -1,6 +1,6 @@
 # ProfitCrafter Forever Plus
 
-Version 0.4.4. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
+Version 0.4.5. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
 The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
@@ -10,14 +10,17 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 
 ### Profit
 
-- Every recipe has a separate Auction Profit and Vendor Profit. They replace the single Profit column and appear in the tables, tooltips, Make me gold, sale notes, the Purge list and "Now profitable" alerts.
+- Every recipe has a separate Auction Profit and Vendor Profit. They replace the single Profit column and appear in the tables, tooltips, sale notes, the Purge list and "Now profitable" alerts.
 - New Sells at vendor column, next to Sells at auction.
 - Profit % shows the higher of the auction and vendor percentages, and the recipe tooltip says which.
 - "Only profitable" is replaced by a Minimum profit % box on the Recipes and Learn pages, 10% by default. The tables always hide recipes that make less than it both at auction and at a vendor. Skill up and Gear upgrades plans ignore it.
 - New Craftable at Profit, Total Auction Profit and Total Vendor Profit columns. Craftable at Profit counts the crafts that make your minimum profit, at auction or at a vendor, whichever gives more. They price the whole batch against the real listings, not just the cheapest one, and allow for your gold, what is listed, your bag space and auction deposits.
 - The "how many?" pop-up and the Crafting plan price batches the same way and show both profits. The pop-up has a Max profitable button and says where buying will stop.
-- Best bets only shows recipes that make the minimum profit and, for auction, sold at least half as many in the last 24 hours as are listed. They're ranked by gold an hour: the profit of Craftable at Profit (no more than sold in the last day), over the time the crafts take at the game's cast time plus 2 minutes to buy and post, so a batch making a few silver never outranks one making gold. One that sold out over the last day, not because of a buyout, scores a quarter more. The recipe tooltip shows the gold an hour, the profit, the crafts and the time.
-- Make me gold uses the same rules for its picks and its Your materials list, and shows both profits on every line and in the totals.
+- Best bets only shows recipes that make the minimum profit and, for auction, sold at least half as many in the last 24 hours as are listed. They're ranked by gold an hour for the batch Make me gold would make (Craftable at Profit, no more than your market share): its profit over the time the crafts take at the game's cast time, plus 2 minutes to buy and post, so a batch making a few silver never outranks one making gold. One that sold out over the last day, not because of a buyout, scores a quarter more. The recipe tooltip shows the gold an hour, the profit, the crafts and the time.
+- Make me gold uses the same rules for its picks and its Your materials list.
+- Make me gold makes each recipe in a batch the size of your market share (your share of what players typically buy in a day, at most a fifth of what's listed, half for something you haven't sold yet) instead of 2 or 3 at a time, and your own sales still raise it. Misc gets 5% more for a hot seller, instead of when 100 or more sell a day. It picks 2 to 6 recipes by gold an hour, leaving out any that make under half of the best one's.
+- Make me gold has a "Sell what's already in my bags" tick box: untick it to keep what you're still carrying and your spare materials. The "Only things that sell N a day" box is gone, and the share boxes read "Don't sell more gear (misc) than N% of what players typically buy in a day".
+- Make me gold shows only the profit the way each line is sold. Materials you already have count as free, and the line ends with what of yours it uses. The totals are Total predicted cost (the gold you spend), returns (the gold you get back, including what's in your bags) and profit, then the bag slots used.
 - Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold in the last day.
 - New setting to only recommend auction recipes that sold in the last day, on by default. A recipe with no sales in the last day shows an orange 0 and a note in its tooltip.
 - Auction flips fill every column, are labelled as flips and have a fuller tooltip.
@@ -86,6 +89,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - The plan priced large auction buys up the listings past what a vendor charges, instead of buying the rest from the vendor.
 - A recipe's material cost was the cheapest listing times the amount it takes, so one cheap listing made a recipe look profitable on every tab. Everything a craft needs is now priced up the real listings, including what goes into materials you make yourself (the 20 Silk Cloth in a vest's 5 bolts). This applies to the Materials column, both profits, Profit %, every table and tooltip, Best bets, Make me gold and the Learn page.
 - Make me gold multiplied the cheapest price by the count while the cost climbed the listings. It overstated profit and could pick batches that lose money.
+- What you sell of an item a day was averaged over 14 days even when you started selling it yesterday, so posting and Make me gold held back the next batch of something that had just sold out. It now counts from your first sale in those 14 days.
 - Stored live listings were used indefinitely, even after the item sold out or its price changed.
 
 ### Selling

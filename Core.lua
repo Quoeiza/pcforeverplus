@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.4" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.5" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
@@ -2352,39 +2352,41 @@ function PC:CraftSeconds(spellID)
     return c[spellID]
 end
 
--- A best bet's score: gold an hour. The profit of the crafts it counts over the time they take: each
--- craft's cast time, plus BEST_SETUP for buying the materials and posting (a batch making a few silver
--- never outranks one making gold).
---   at auction: Craftable at Profit, but no more than sold in the last day (fewer when other ProfitCrafter
---     users have some coming, never under half), the batch priced like Total Auction Profit
---   to a vendor: Craftable at Profit (a vendor takes any amount): its Total Vendor Profit
---   disenchanted: the market check (the dust has to sell), at its profit each, plus the disenchanting
--- A quarter more when it sold out over the last day (e.hot). Returns the score (copper an hour), the crafts,
--- their profit and the seconds; nil when it isn't a best bet. Worked out once per recipe until prices change.
+-- Gold an hour for n crafts of a recipe: their profit the way it's sold (the batch priced up the listings;
+-- disenchanted: its profit each) over the time they take: each craft's cast time (and the disenchanting),
+-- plus BEST_SETUP for buying the materials and posting. Returns copper an hour, the profit, the seconds.
+function PC:GoldAnHour(e, n)
+    if not n or n <= 0 then return 0, 0, self.BEST_SETUP end
+    local each = e.ahFlip and 0 or self:CraftSeconds(e.id)
+    local p
+    if e.route == "Disenchant" then
+        p = (e.profit or 0) * n
+        if self.Synergy then each = each + self:CraftSeconds(self.Synergy.DISENCHANT_SPELL) end
+    else
+        local ah, v, routed = self:BatchProfit(e, n)
+        p = (e.route == "Vendor" and v) or (e.route == "AH" and ah) or routed or 0
+    end
+    local secs = n * each + self.BEST_SETUP
+    return p / secs * 3600, p, secs
+end
+
+-- A best bet's score: gold an hour (PC:GoldAnHour) for the batch Make me gold would make: Craftable at
+-- Profit the way it's sold, but no more than the market cap (your share of a day's sales, a slice of
+-- what's listed, half for a first batch, what other ProfitCrafter users have coming, what you hold).
+-- A batch making a few silver never outranks one making gold. A quarter more when it sold out over the
+-- last day (e.hot). Returns the score (copper an hour), the crafts, their profit and the seconds; nil when
+-- it isn't a best bet. Worked out once per recipe until prices change.
 function PC:BestBetScore(e)
     if not (e and e.bestOK) then return nil end
     if e._best then return unpack(e._best, 1, 4) end
-    local n, _, _, _, tV, _, _, nAH, nV = self:Craftable(e)
-    local p, k = 0, 0
-    local each = e.ahFlip and 0 or self:CraftSeconds(e.id)
-    if e.route == "Vendor" then
-        k = nV or 0
-        p = tV or 0
-    elseif e.route == "AH" then
-        local sold = e.soldDay or 0
-        local coming = sold > 0 and self:ComingSupply(e.outID or e.r.output, sold) or 0
-        if coming > 0 then sold = sold * math.max(0.5, sold / (sold + coming)) end
-        k = math.min(nAH or 0, math.floor(sold / math.max(e.r.qty or 1, 1)))
-        p = k > 0 and (self:BatchProfit(e, k) or 0) or 0
-    else
-        local cap = self.MakeGold and self.MakeGold:MarketCap(e)
-        k = math.min(n or 0, cap or n or 0)
-        p = (e.profit or 0) * k
-        if self.Synergy then each = each + self:CraftSeconds(self.Synergy.DISENCHANT_SPELL) end
-    end
-    if k <= 0 then k, p = 0, 0 end
-    local secs = k * each + self.BEST_SETUP
-    local s = p / secs * 3600
+    local n, _, _, _, _, _, _, nAH, nV = self:Craftable(e)
+    local k = (e.route == "Vendor" and nV) or (e.route == "AH" and nAH) or n or 0
+    -- (a vendor takes any amount: Craftable at Profit already stops where crafts stop making the minimum)
+    local G = self.MakeGold
+    local cap = e.route ~= "Vendor" and G and G:MarketCap(e)
+    if cap then k = math.min(k, cap, G.MAX_CRAFTS) end
+    k = math.max(k, 0)
+    local s, p, secs = self:GoldAnHour(e, k)
     if e.hot then s = s * self.HOT_BONUS end
     e._best = { s, k, p, secs }
     return s, k, p, secs

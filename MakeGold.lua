@@ -20,7 +20,9 @@ local VendorAuto = PC.VendorAuto
 ---------------------------------------------------------------------------
 local Gold = {}
 PC.MakeGold = Gold
-Gold.MAX_ROWS = 8   -- crafts to buy for
+Gold.MAX_ROWS = 6   -- crafts to buy for (at most)
+Gold.MIN_ROWS = 2   -- and at least, when that many are worth it
+Gold.MAX_CRAFTS = 200 -- of one recipe (vendor flips: FLIP_MAX)
 Gold.MAX_LEFT = 6   -- what you're still carrying
 Gold.MAX_MATS = 6   -- crafts from your materials
 Gold.MAX_SELL = 8   -- materials to sell
@@ -51,13 +53,20 @@ function Gold:IsGear(itemID)
     return classID == 2 or classID == 4 -- weapon, armor
 end
 
--- Your share of a day's sales: gear sells slowly (10%), used-up items faster (20%, 25% when 100+ sell a day)
-function Gold:Share(e, perDay)
+-- Your share of what players typically buy in a day: gear sells slowly (10%), everything else faster (20%,
+-- 5% more for a hot seller: more bought than listed over the last day, not after a buyout)
+function Gold:Share(e)
     local id = e.outID or e.r.output
     if self:IsGear(id) then return (PC.db.goldShareGear or 10) / 100 end
     local pct = PC.db.goldShareUse or 20
-    if perDay and perDay >= 100 then pct = pct + 5 end
+    if e.hot then pct = pct + 5 end
     return pct / 100
+end
+
+-- What one craft brings in, the way it's sold (after the auction cut)
+function Gold:Income(e)
+    local ah, v, route = PC:CraftIncome(e)
+    return (e.route == "Vendor" and v) or (e.route == "AH" and ah) or route
 end
 
 -- What YOU really sell of an item a day, from your own sales over the last two weeks (nil = you
@@ -70,19 +79,19 @@ function Gold:OwnPerDay(itemID)
     if not L or (L.posted or 0) < 3 then return nil end
     local name = PC:ItemName(itemID)
     if not name then return nil end
-    local since, sold = time() - self.OWN_DAYS * 86400, 0
+    local now = time()
+    local since, sold, first = now - self.OWN_DAYS * 86400, 0, now
     for _, e in ipairs(cdb.ledger) do
-        if e.kind == "sell" and e.item == name and (e.t or 0) >= since then sold = sold + (e.qty or 1) end
+        if e.kind == "sell" and e.item == name and (e.t or 0) >= since then
+            sold = sold + (e.qty or 1)
+            first = math.min(first, e.t)
+        end
     end
-    return sold / self.OWN_DAYS
-end
-
--- The most worth making of an item, by your own sales: two days' worth of what you sell, minus what
--- you already hold or have up (nil = no record of your own)
-function Gold:OwnCap(itemID)
-    local per = self:OwnPerDay(itemID)
-    if not per then return nil end
-    return math.max(math.ceil(per * 2) - self:Holding(itemID), 0)
+    -- over the days since your first sale in that window (at least one): a batch that sold out yesterday
+    -- isn't spread over two weeks
+    -- shortcut: counts from the first sale, not the first post; store first posts if that overstates slow sellers
+    local days = math.min(math.max((now - first) / 86400, 1), self.OWN_DAYS)
+    return sold / days
 end
 
 -- How many of an item you already hold: bags, bank, in the mail, and posted on the AH
@@ -176,16 +185,29 @@ function Gold:MarketCapRaw(e)
     end
     local holding = self:HoldingForPlan(id)
     if holding > 0 then why[#why + 1] = ("you hold %d"):format(holding) end
-    local crafts = math.floor((items - holding) / per)
-    crafts = math.max(crafts, 0)
-    local slow, swhy = self:SlowCap(e)
-    if slow and slow < crafts then return slow, swhy, true end
-    -- yours are selling faster than the market's numbers say: follow your own sales
-    if slow and slow > crafts and PC:SoldToday(id) > 0 then return slow, swhy end
-    return crafts, table.concat(why, ", ")
+    -- none of yours sold in the last two weeks: half your share for a first batch
+    local mine, fast = PC:SoldSince(id, time() - 86400)
+    if mine == 0 and PC:SoldSince(id, time() - self.OWN_DAYS * 86400) == 0 then
+        items = items / 2
+        why[#why + 1] = "half for a first batch"
+    end
+    -- what you yourself sell of it: no more than two days' worth (the scans can make a slow seller look busy)
+    local own = self:OwnPerDay(id)
+    if own and own * 2 < items then
+        items = math.ceil(own * 2)
+        why[#why + 1] = ("you sell ~%d a day"):format(math.floor(own + 0.5))
+    end
+    -- yours are selling faster than that today: follow your own sales (three times when they went within the hour)
+    local more = mine * (fast and self.FAST_MORE or 2)
+    if more > items then
+        items = more
+        why[#why + 1] = ("%d of yours sold today: making more"):format(mine)
+    end
+    return math.max(math.floor((items - holding) / per), 0), table.concat(why, ", ")
 end
 
--- Start small, then follow your own sales (the standard for every crafted item you sell):
+-- Start small, then follow your own sales (what gets posted that no plan made, and crafts held back with
+-- the "hold crafts for the market" option; Make me gold and Best bets go by the market cap above):
 --   * never sold: a test batch of 3 (gear 2). Nothing more while those are still around.
 --   * none of yours sold in 3 days: no more, until the test batch is gone and a few days have passed;
 --     then another test batch
@@ -237,26 +259,8 @@ function Gold:SlowCap(e)
     return crafts, why
 end
 
--- How much of a batch sells within a day, as a weight 0.1..1 (vendor flips sell on the spot;
--- no sales data counts as middling)
-function Gold:Turnover(c)
-    local e = c.e
-    if e.route == "Vendor" then return 1 end
-    local per = math.max(e.r and e.r.qty or 1, 1)
-    local t
-    if c.perDay and c.cap and c.cap > 0 then t = math.min(c.perDay / per / c.cap, 1) end
-    -- what you've seen yourself beats the scan estimate: hours your own posts took to sell
-    local it = PC.Learn and PC.Learn:On() and PC.Learn:Data().items[e.outID or (e.r and e.r.output)]
-    if it and (it.sales or 0) >= 3 then
-        local own = math.min(24 / math.max(it.hours / it.sales, 1), 1)
-        t = t and (t + own) / 2 or own
-    end
-    t = t or 0.5
-    return 0.1 + 0.9 * t
-end
-
 -- returns picks { {e, n, cost, profit} }, total cost, total profit
-function Gold:Build(budget, minSold)
+function Gold:Build(budget)
     local UI = PC.UI
     if not UI.allEntries then UI.allEntries = PC:Analyze() end
     local cands = {}
@@ -267,36 +271,22 @@ function Gold:Build(budget, minSold)
             and (PC:SellThrough(e))
             and not (PC.Learn and PC.Learn:Avoided(e.id))
             and not (self.skip and self.skip.pick[e.id]) then
-            local perDay = self:SoldPerDay(e)
-            local ok = e.route == "Vendor" or (minSold or 0) <= 0 or (perDay and perDay >= minSold)
-            if ok then
-                -- the one market rule: your share of sales, a slice of what's listed, minus what you hold
-                local cap = self:MarketCap(e)
-                if cap == nil then
-                    -- no market numbers: 2 to try, or what your own sales today say
-                    local id = e.outID or e.r.output
-                    cap = self:SlowCap(e) or 2
-                    if not (id and PC:SoldToday(id) > 0) then cap = math.min(cap, 2) end
-                end
-                -- what you yourself sell of it: never more than that (Basic Campfire Kits sold 1 or 2 a day)
-                if e.route ~= "Vendor" then
-                    local own = self:OwnCap(e.outID or e.r.output)
-                    if own then cap = math.min(cap, own) end
-                end
-                if cap > 0 then cands[#cands + 1] = { e = e, cap = math.min(cap, e.route == "Vendor" and self.FLIP_MAX or 200), perDay = perDay, hot = e.hot } end
+            -- the one market rule: your share of sales, a slice of what's listed, minus what you hold
+            -- (no market numbers: 2 to try)
+            local cap = math.min(self:MarketCap(e) or 2, e.route == "Vendor" and self.FLIP_MAX or self.MAX_CRAFTS)
+            -- no more than the materials can be bought for while each craft still clears the minimum profit
+            local most = cap > 0 and PC:CraftableAtMin(e, math.huge) or 0
+            local n = math.min(cap, most or cap)
+            if n > 0 then
+                -- gold an hour for that batch, as in Best bets (a quarter more when it sold out over the last
+                -- day; learned: purged or twice-unsold items rank lower until they sell again)
+                local pen = PC.Learn and PC.Learn:Penalty(e.outID or e.r.output) or 0
+                local rate = PC:GoldAnHour(e, n) * (1 - pen) * (e.hot and PC.HOT_BONUS or 1)
+                if rate > 0 then cands[#cands + 1] = { e = e, cap = n, perDay = self:SoldPerDay(e), rate = rate } end
             end
         end
     end
-    -- best return on the gold you spend first
-    -- Best gold back for the gold you spend, counting how fast it sells: a small-margin item that
-    -- sells out in a day (bolts of cloth) beats a big-margin one that sits on the AH for a week.
-    -- (learned: purged or twice-unsold items rank lower until they sell again)
-    -- (sold out over the last day, not after a buyout: a quarter more, as in Best bets)
-    local function score(c)
-        local pen = PC.Learn and PC.Learn:Penalty(c.e.outID or (c.e.r and c.e.r.output)) or 0
-        return c.e.profit / c.e.cost * self:Turnover(c) * (1 - pen) * (c.hot and PC.HOT_BONUS or 1)
-    end
-    table.sort(cands, function(a, b) return score(a) > score(b) end)
+    table.sort(cands, function(a, b) return a.rate > b.rate end)
     local picks, chosen = {}, {}
     self.bagLimited = nil
     local free = PC:FreeBagSlots()
@@ -312,11 +302,12 @@ function Gold:Build(budget, minSold)
         return (total or 0) + PC:PostReserve(entries), missing
     end
     for _, c in ipairs(cands) do
-        local pick = { e = c.e, n = 0, perDay = c.perDay }
+        -- 2 to 6 recipes, none making under half the best one's gold an hour: fewer runs between the
+        -- bench and the AH for a few silver
+        if #picks >= self.MIN_ROWS and c.rate < picks[1].rate / 2 then break end
+        local pick = { e = c.e, n = 0, perDay = c.perDay, rate = c.rate }
         chosen[#chosen + 1] = pick
-        -- no more than the materials can be bought for while each craft still clears the minimum profit
-        local most = PC:CraftableAtMin(c.e, math.huge)
-        local lo, hi = 0, math.min(c.cap, most or c.cap)
+        local lo, hi = 0, c.cap
         while lo < hi do -- most crafts of this recipe that still fit the gold and your bags
             local mid = math.floor((lo + hi + 1) / 2)
             pick.n = mid
@@ -335,16 +326,32 @@ function Gold:Build(budget, minSold)
     end
     self.slotsUsed, self.slotsFree = slotsOf(chosen), free
     local total = costOf(chosen)
-    local profit = 0
+    -- each line: the gold it adds to the shopping list in turn (materials priced up the listings; yours go
+    -- to the first lines that use them, free), what it brings in, and which of yours it uses. The lines add
+    -- up to the totals. Returns the picks, the gold to keep back (materials and deposits), the profit, and
+    -- the gold the materials cost.
+    local profit, spent, sofar, prevOwn = 0, 0, {}, {}
     for _, p in ipairs(picks) do
-        -- the whole batch's materials priced up the listings, not just the cheapest one
-        local ah, v, routed = PC:BatchProfit(p.e, p.n)
-        p.ahProfit, p.vProfit = ah, v
-        p.profit = routed or p.e.profit * p.n
+        sofar[#sofar + 1] = setmetatable({ planCount = p.n }, { __index = p.e })
+        local list, spend = PC:CombinedShoppingList(sofar, 1)
+        local own = {}
+        for _, it in ipairs(list or {}) do
+            local used = math.min(it.need or 0, it.have or 0)
+            if used > 0 then own[it.id] = used end
+        end
+        p.own = {}
+        for id, used in pairs(own) do
+            local d = used - (prevOwn[id] or 0)
+            if d > 0 then p.own[#p.own + 1] = { id = id, n = d } end
+        end
+        prevOwn = own
+        p.cost = math.max((spend or 0) - spent, 0)
+        spent = spent + p.cost
+        p.income = p.n * (self:Income(p.e) or 0)
+        p.profit = p.income - p.cost
         profit = profit + p.profit
-        p.cost = costOf({ p })
     end
-    return picks, total, profit
+    return picks, total, profit, spent
 end
 
 function Gold:Open()
@@ -370,23 +377,28 @@ function Gold:Open()
         w.title:SetText("Make me gold")
         w.budget = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         w.budget:SetPoint("TOPLEFT", 14, -40)
-        local l = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        l:SetPoint("TOPLEFT", 14, -64)
-        l:SetText("Only things that sell at least")
-        w.minBox = CreateFrame("EditBox", nil, w, "InputBoxTemplate")
-        w.minBox:SetSize(36, 20)
-        w.minBox:SetPoint("LEFT", l, "RIGHT", 10, 0)
-        w.minBox:SetAutoFocus(false)
-        w.minBox:SetNumeric(true)
-        w.minBox:SetMaxLetters(3)
-        w.minBox:SetScript("OnEnterPressed", function(eb) eb:ClearFocus(); Gold:Update() end)
-        w.minBox:SetScript("OnEditFocusLost", function() Gold:Update() end)
-        local l2 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        l2:SetPoint("LEFT", w.minBox, "RIGHT", 6, 0)
-        l2:SetText("a day")
+        -- selling what's already in your bags (what you're still carrying, spare materials): off keeps them
+        w.sellBags = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
+        w.sellBags:SetSize(22, 22)
+        w.sellBags:SetPoint("TOPLEFT", 10, -58)
+        w.sellBags:SetScript("OnClick", function(btn)
+            PC.db.goldSellBags = btn:GetChecked() and true or false
+            Gold:Update()
+        end)
+        w.sellBags:SetScript("OnEnter", function(btn)
+            GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Sell what's already in my bags")
+            GameTooltip:AddLine("What you're still carrying from an earlier plan, and materials no craft here uses.", 1, 1, 1, true)
+            GameTooltip:AddLine("Untick to keep them.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        w.sellBags:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        local l7 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        l7:SetPoint("LEFT", w.sellBags, "RIGHT", 2, 0)
+        l7:SetText("Sell what's already in my bags")
         local l3 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        l3:SetPoint("TOPLEFT", 14, -90)
-        l3:SetText("Your share of a day's sales:  gear")
+        l3:SetPoint("TOPLEFT", 14, -88)
+        l3:SetText("Don't sell more gear than")
         local function pctBox(anchor)
             local eb = CreateFrame("EditBox", nil, w, "InputBoxTemplate")
             eb:SetSize(32, 20)
@@ -401,17 +413,21 @@ function Gold:Open()
         w.gearBox = pctBox(l3)
         local l4 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         l4:SetPoint("LEFT", w.gearBox, "RIGHT", 4, 0)
-        l4:SetText("%   consumables")
-        w.useBox = pctBox(l4)
+        l4:SetText("% of what players typically buy in a day")
         local l5 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        l5:SetPoint("LEFT", w.useBox, "RIGHT", 4, 0)
-        l5:SetText("%")
-        local l6 = w:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        l6:SetPoint("TOPLEFT", l3, "BOTTOMLEFT", 0, -4)
-        l6:SetText("Others sell it too. Consumables get +5% when 100 or more sell a day.")
+        l5:SetPoint("TOPLEFT", l3, "BOTTOMLEFT", 0, -12)
+        l5:SetText("Don't sell more misc than")
+        w.useBox = pctBox(l5)
+        local l6 = w:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        l6:SetPoint("LEFT", w.useBox, "RIGHT", 4, 0)
+        l6:SetText("% of what players typically buy in a day")
+        w.note = w:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        w.note:SetPoint("TOPLEFT", l5, "BOTTOMLEFT", 0, -8)
         w.lines = {}
         w.total = w:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         w.total:SetPoint("BOTTOMLEFT", 14, 44)
+        w.total:SetJustifyH("LEFT")
+        w.total:SetSpacing(4)
         w.use = CreateFrame("Button", nil, w, "UIPanelButtonTemplate")
         w.use:SetSize(130, 24)
         w.use:SetPoint("BOTTOMRIGHT", -12, 12)
@@ -426,7 +442,7 @@ function Gold:Open()
     end
     -- a fresh window: nothing taken off yet
     self.skip = { left = {}, pick = {}, mat = {}, sell = {} }
-    w.minBox:SetText(tostring(PC.db.goldMinSold or 1))
+    w.sellBags:SetChecked(PC.db.goldSellBags ~= false)
     w.gearBox:SetText(tostring(PC.db.goldShareGear or 10))
     w.useBox:SetText(tostring(PC.db.goldShareUse or 20))
     w:Show()
@@ -437,33 +453,40 @@ end
 function Gold:Update()
     local w = self.win
     if not w or not w:IsShown() then return end
-    PC.db.goldMinSold = tonumber(w.minBox:GetText()) or 0
     PC.db.goldShareGear = math.min(math.max(tonumber(w.gearBox:GetText()) or 10, 1), 100)
     PC.db.goldShareUse = math.min(math.max(tonumber(w.useBox:GetText()) or 20, 1), 100)
+    w.note:SetText(("Misc: 5%% more for a hot seller (%d%% becomes %d%%)"):format(PC.db.goldShareUse, PC.db.goldShareUse + 5))
     local budget = PC.UI:PlanBudget()
     w.budget:SetText(("Spend up to %s  |cff888888(%s)|r"):format(PC:Money(budget, false, true), PC.UI:BudgetName()))
-    local picks, total, profit = self:Build(budget, PC.db.goldMinSold)
+    local picks, total, _, spent = self:Build(budget)
     self.picks = picks
     -- deposits for what goes on the AH come out of what's left of your spending limit
     local room = { left = math.max(budget - (#picks > 0 and total or 0), 0) }
-    local left, mats, sells = self:Carrying(room), self:MatCrafts(picks, room), nil
-    sells = self:MatSells(picks, mats, left, room)
+    -- (what's in your bags is only sold when you want it sold)
+    local keep = PC.db.goldSellBags == false
+    local left, mats, sells = keep and {} or self:Carrying(room), self:MatCrafts(picks, room), {}
+    if not keep then sells = self:MatSells(picks, mats, left, room) end
     self.left, self.mats, self.sells = left, mats, sells
     local words = { post = "|cff40c0ffpost at auction|r", disenchant = "|cffc080ffdisenchant for dust|r", vendor = "|cffffd100sell to a vendor|r" }
     local function routeWords(e)
         local route = e.route
         return (route == "Vendor" and words.vendor) or (route == "Disenchant" and words.disenchant) or words.post
     end
-    -- both profits for a line: on the AH and to a vendor (the way it's sold in white, the other dimmed)
+    -- a line's profit, the way it's sold (only that one: the other way isn't what the plan does)
     local function profits(x)
-        local function one(label, v, used)
-            local txt = v and PC:Money(v, true, true) or "|cff888888n/a|r"
-            return (used and "|cffffffff" or "|cff888888") .. label .. "|r " .. txt
-        end
-        local vendor = x.e.route == "Vendor"
-        return one("Auction Profit", x.ahProfit, not vendor) .. "  " .. one("Vendor Profit", x.vProfit, vendor)
+        local route = x.e.route
+        local label = (route == "Vendor" and "Vendor Profit") or (route == "Disenchant" and "Disenchant Profit") or "Auction Profit"
+        return "|cffffffff" .. label .. "|r " .. PC:Money(x.profit or 0, true, true)
     end
-    local n, y = 0, -130
+    -- what of yours a line uses (free: you already have it)
+    local function yours(x)
+        if not x.own or #x.own == 0 then return "" end
+        local parts = {}
+        for _, o in ipairs(x.own) do parts[#parts + 1] = ("%d %s"):format(o.n, PC:ItemName(o.id) or ("item " .. tostring(o.id))) end
+        local text = #parts > 1 and (table.concat(parts, ", ", 1, #parts - 1) .. " and " .. parts[#parts]) or parts[1]
+        return "   |cff888888(plus " .. text .. " you already have)|r"
+    end
+    local n, y = 0, -154
     local function line(text, kind, key)
         n = n + 1
         local L = self:Line(n)
@@ -493,8 +516,8 @@ function Gold:Update()
         for _, p in ipairs(picks) do
             local listed = PC:Supply()[p.e.outID or p.e.r.output]
             local sells = p.perDay and ("|cff888888~%d/day, %s listed|r"):format(math.floor(p.perDay + 0.5), listed and tostring(listed) or "?") or "|cff888888sales unknown|r"
-            line(("%s  |cffffffffx%d|r  %s   %s   |cff888888cost|r %s   %s"):format(p.e.r.name, p.n, routeWords(p.e), sells,
-                PC:Money(p.cost or 0, false, true), profits(p)), "pick", p.e.id)
+            line(("%s  |cffffffffx%d|r  %s   %s   |cff888888cost|r %s   %s%s"):format(p.e.r.name, p.n, routeWords(p.e), sells,
+                PC:Money(p.cost or 0, false, true), profits(p), yours(p)), "pick", p.e.id)
         end
         y = y - 6
     end
@@ -502,8 +525,7 @@ function Gold:Update()
     if #mats > 0 or #sells > 0 then
         line("|cffffd100Your materials|r")
         for _, m in ipairs(mats) do
-            profit = profit + (m.profit or 0)
-            line(("%s  |cffffffffx%d|r  %s   |cff888888nothing to buy|r   %s"):format(m.e.r.name, m.n, routeWords(m.e), profits(m)), "mat", m.e.id)
+            line(("%s  |cffffffffx%d|r  %s   |cff888888nothing to buy|r   %s%s"):format(m.e.r.name, m.n, routeWords(m.e), profits(m), yours(m)), "mat", m.e.id)
         end
         for _, l in ipairs(sells) do
             sellValue = sellValue + (l.each or 0) * l.n
@@ -512,31 +534,28 @@ function Gold:Update()
         y = y - 6
     end
     if n == 0 then
-        line("|cff888888Nothing fits yet. Scan the Auction House a few times so sales can be estimated, or lower the \"sells a day\" number.|r")
+        line("|cff888888Nothing fits yet. Scan the Auction House a few times so sales can be estimated.|r")
     end
     for i = n + 1, #w.lines do w.lines[i]:Hide() end
-    w:SetHeight(math.max(368, -y + 80))
-    local bags = ("  |cff888888bags %d/%d|r"):format(self.slotsUsed or 0, self.slotsFree or 0)
-    if self.bagLimited then bags = ("  |cffff8040limited by bag space (%d free)|r"):format(self.slotsFree or 0) end
     local any = #picks > 0 or #mats > 0 or #left > 0 or #sells > 0
-    local parts = {}
-    if #picks > 0 then parts[#parts + 1] = ("Total %s"):format(PC:Money(total, false, true)) end
-    if #picks + #mats > 0 then
-        -- both ways for everything listed, and what the plan makes selling each the way it's marked
-        local ah, v, anyAH, anyV = 0, 0, false, false
-        for _, list in ipairs({ picks, mats }) do
-            for _, x in ipairs(list) do
-                if x.ahProfit then ah, anyAH = ah + x.ahProfit, true end
-                if x.vProfit then v, anyV = v + x.vProfit, true end
-            end
-        end
-        parts[#parts + 1] = ("Auction Profit %s  Vendor Profit %s  |cff888888(as planned %s)|r"):format(
-            anyAH and PC:Money(ah, true, true) or "|cff888888n/a|r", anyV and PC:Money(v, true, true) or "|cff888888n/a|r",
-            PC:Money(profit, true, true))
+    -- the totals: the gold you spend, the gold you get back (the crafts sold the way each is marked, and
+    -- what's in your bags), and the difference. What you already have counts as free.
+    local returns = sellValue
+    for _, list in ipairs({ picks, mats }) do
+        for _, x in ipairs(list) do returns = returns + (x.income or 0) end
     end
-    if sellValue > 0 then parts[#parts + 1] = ("selling about |cff40ff40%s|r"):format(PC:Money(sellValue, false, true)) end
-    w.total:SetText(any and (table.concat(parts, "  " .. PC.ARROW_R .. "  ") .. (#picks > 0 and bags or ""))
+    local parts = {
+        ("Total predicted cost: |cffffffff%s|r"):format(PC:Money(spent or 0, false, true)),
+        ("Total predicted returns: |cffffffff%s|r"):format(PC:Money(returns, false, true)),
+        ("Total predicted profit: %s"):format(PC:Money(returns - (spent or 0), true, true)),
+    }
+    if #picks > 0 or self.bagLimited then
+        parts[#parts + 1] = ("Bag slots used: %d of %d free%s"):format(self.slotsUsed or 0, self.slotsFree or 0,
+            self.bagLimited and " |cffff8040(limited by bag space)|r" or "")
+    end
+    w.total:SetText(any and table.concat(parts, "\n")
         or (self.bagLimited and ("|cffff8040Nothing fits in your bags (%d free slots).|r"):format(self.slotsFree or 0) or ""))
+    w:SetHeight(math.max(368, -y + 66 + math.max(w.total:GetStringHeight() or 0, 14)))
     w.use:SetEnabled(any)
 end
 
@@ -568,8 +587,8 @@ function Gold:Line(i)
     return L
 end
 
--- Where to sell n of an item, or nil: the AH only when it really sells there (at least the "sells a
--- day" number) and the deposit fits what's left of your spending limit; otherwise a vendor when one
+-- Where to sell n of an item, or nil: the AH only when it really sells there (at least one a day) and
+-- the deposit fits what's left of your spending limit; otherwise a vendor when one
 -- pays; otherwise it isn't offered. room = { left = copper you can still spend }.
 function Gold:SellRoute(id, n, room)
     local what, each = PC.Sell:Recommend(id)
@@ -579,11 +598,10 @@ function Gold:SellRoute(id, n, room)
     if costEach and vend < costEach then vend = 0 end
     if what == "post" then
         local perDay = self:SoldPerDay({ outID = id, r = {} })
-        local minSold = math.max(PC.db.goldMinSold or 1, 1)
         local deposit = (PC.Sell.FeeEach and (PC.Sell:FeeEach(id) or 0) * n) or (PC.Sell.Deposit and PC.Sell:Deposit(id, nil, n)) or 0
         -- (and only at a profit: what it brings in after the deposit beats a vendor)
         local net = (each or 0) * n - (deposit or 0)
-        if not perDay or perDay < minSold or (deposit or 0) > room.left or net <= 0 or net <= vend * n then
+        if not perDay or perDay < 1 or (deposit or 0) > room.left or net <= 0 or net <= vend * n then
             if vend > 0 then return "vendor", vend end
             return nil
         end
@@ -639,16 +657,11 @@ function Gold:MatCrafts(picks, room)
         for _, rg in ipairs(e.r.reagents) do can = math.min(can, math.floor(math.max(have(rg), 0) / (rg.n or 1))) end
         if can ~= math.huge and can > 0 and e.route ~= "Vendor" and e.route ~= "Disenchant" then
             -- the same rules as any craft: only what really sells (your own sales first, then the market)
-            local id = e.outID or e.r.output
-            local own = self:OwnCap(id)
-            if own then can = math.min(can, own)
-            else
-                local cap = self:MarketCap(e)
-                if cap ~= nil then can = math.min(can, cap) end
-            end
+            local cap = self:MarketCap(e)
+            if cap ~= nil then can = math.min(can, cap) end
         end
         if can ~= math.huge and can > 0 then
-            can = math.min(can, 200)
+            can = math.min(can, self.MAX_CRAFTS)
             -- going on the AH: its deposit has to fit what's left of your spending limit
             local fits = true
             if room and e.route ~= "Vendor" and e.route ~= "Disenchant" then
@@ -657,9 +670,14 @@ function Gold:MatCrafts(picks, room)
                 if dep > room.left then fits = false else room.left = room.left - dep end
             end
             if fits then
-                for _, rg in ipairs(e.r.reagents) do use(rg, (rg.n or 1) * can) end
-                out[#out + 1] = { e = e, n = can, profit = e.profit * can,
-                    ahProfit = e.ahProfit and e.ahProfit * can, vProfit = e.vendorProfit and e.vendorProfit * can }
+                local own = {}
+                for _, rg in ipairs(e.r.reagents) do
+                    use(rg, (rg.n or 1) * can)
+                    own[#own + 1] = { id = (PC:ReagentFor(rg, e.mats)), n = (rg.n or 1) * can }
+                end
+                -- (nothing to buy: what it brings in is all profit)
+                local income = can * (self:Income(e) or 0)
+                out[#out + 1] = { e = e, n = can, income = income, profit = income, own = own }
                 if #out >= self.MAX_MATS then break end
             end
         end
