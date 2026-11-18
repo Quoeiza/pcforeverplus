@@ -1013,6 +1013,56 @@ function UI:ClickItem(itemID, button)
     return false
 end
 
+-- The minimum profit: a craft has to make at least this % of its materials' cost, at auction or to a
+-- vendor. Lists hide recipes under it, buying stops before a craft drops under it, and Craftable at
+-- Profit counts only crafts that make it.
+function UI:SetMinProfit(v)
+    v = tonumber(v)
+    if not v then return end
+    v = math.max(0, math.min(1000, math.floor(v)))
+    if v == PC:MinProfitPct() then return end
+    PC.db.minProfitPct = v
+    self.allEntries = nil
+    self.offset, self.learnOffset = 0, 0
+    PC:ForgetStopList()
+    PC:RefreshUI()
+end
+
+-- "Minimum profit % [10]": a label and a number box (Enter or clicking away applies it, Escape undoes)
+function UI.MinProfitBox(parent)
+    local f = CreateFrame("Frame", nil, parent)
+    local label = UI.Ink(f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"))
+    label:SetPoint("LEFT", 0, 0)
+    label:SetText("Minimum profit %")
+    local eb = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+    eb:SetSize(34, 20)
+    eb:SetPoint("LEFT", label, "RIGHT", 8, 0)
+    eb:SetAutoFocus(false)
+    eb:SetNumeric(true)
+    eb:SetMaxLetters(4)
+    eb:SetJustifyH("CENTER")
+    local function shown() return tostring(PC:MinProfitPct()) end
+    eb:SetScript("OnEnterPressed", function(b) b:ClearFocus() end) -- (losing the focus applies it)
+    eb:SetScript("OnEditFocusLost", function(b)
+        PC:Safe("minimum profit", UI.SetMinProfit, UI, b:GetText())
+        b:SetText(shown())
+    end)
+    eb:SetScript("OnEscapePressed", function(b) b:SetText(shown()); b:ClearFocus() end)
+    eb:SetScript("OnEnter", function(b)
+        ShowTooltip(b, { "Minimum profit %", "A recipe must make at least this % of its material cost, at auction (after the 5% cut) or at a vendor.",
+            "Recipes under it are hidden, buying stops before a craft drops under it, and Craftable at Profit counts only the crafts that make it.",
+            "Skill up and Gear upgrades plans ignore it." })
+    end)
+    eb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    eb:SetText(shown())
+    f.edit = eb
+    -- keeps up with the setting (unless you're typing in it)
+    function f:Refresh() if not (eb.HasFocus and eb:HasFocus()) then eb:SetText(shown()) end end
+    local w = ((label.GetStringWidth and label:GetStringWidth()) or 90) + 8 + 34 + 4
+    f:SetSize(w, 22)
+    return f
+end
+
 ---------------------------------------------------------------------------
 -- Main frame
 ---------------------------------------------------------------------------
@@ -1080,7 +1130,7 @@ function UI:Create()
     self.usePortrait = usePortrait
     self:ApplyIcon()
 
-    -- Top row: search, "Only profitable", status / progress bar
+    -- Top row: search, Minimum profit %, Can afford, status / progress bar
     local left = NAV > 0 and (NAV + 8) or (usePortrait and 64 or 14)
 
     local search = CreateFrame("EditBox", nil, f,
@@ -1097,47 +1147,14 @@ function UI:Create()
     search:HookScript("OnEnterPressed", search.ClearFocus)
     f.search = search
 
-    local cb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
-    cb:SetSize(22, 22)
-    cb:SetPoint("LEFT", search, "RIGHT", 14, 0)
-    cb:SetScript("OnClick", function(btn)
-        PC.db.onlyProfit = btn:GetChecked() and true or false
-        UI.offset = 0
-        UI:Redraw()
-    end)
-    cb:SetScript("OnEnter", function(btn)
-        ShowTooltip(btn, { btn.label or "Only Auction profit", ("Only recipes making at least %s%% Auction Profit, after the 5%% auction cut."):format(PC:MinProfitPct()),
-            "With Vendor profit ticked too, a recipe must meet both. Ignored in Best bets and Vendor flips. Set the minimum in Settings." })
-    end)
-    cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    local cbText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    cbText:SetPoint("LEFT", cb, "RIGHT", 2, 0)
-    cbText:SetText("Only Auction profit"); UI.Ink(cbText) -- (shows the minimum once the window draws)
-    f.onlyProfit, f.onlyProfitText = cb, cbText
-
-    -- the same for V Profit (what a vendor pays you, less the materials)
-    local cbV = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
-    cbV:SetSize(22, 22)
-    cbV:SetPoint("LEFT", cbText, "RIGHT", 10, 0)
-    cbV:SetScript("OnClick", function(btn)
-        PC.db.onlyVProfit = btn:GetChecked() and true or false
-        UI.offset = 0
-        UI:Redraw()
-    end)
-    cbV:SetScript("OnEnter", function(btn)
-        ShowTooltip(btn, { btn.label or "Only Vendor profit", ("Only recipes making at least %s%% Vendor Profit, selling to a vendor."):format(PC:MinProfitPct()),
-            "With Auction profit ticked too, a recipe must meet both. Ignored in Best bets. Set the minimum in Settings." })
-    end)
-    cbV:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    local cbVText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    cbVText:SetPoint("LEFT", cbV, "RIGHT", 2, 0)
-    cbVText:SetText("Only Vendor profit"); UI.Ink(cbVText)
-    f.onlyVProfit, f.onlyVProfitText = cbV, cbVText
+    local minBox = UI.MinProfitBox(f)
+    minBox:SetPoint("LEFT", search, "RIGHT", 14, 0)
+    f.minProfit = minBox
 
     -- Only recipes your gold (or the amount you set on Levels & gold) can pay the materials for
     local cb2 = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
     cb2:SetSize(22, 22)
-    cb2:SetPoint("LEFT", cbVText, "RIGHT", 10, 0)
+    cb2:SetPoint("LEFT", minBox, "RIGHT", 14, 0)
     cb2:SetScript("OnClick", function(btn)
         PC.db.onlyAffordable = btn:GetChecked() and true or false
         UI.offset = 0
@@ -2006,12 +2023,7 @@ function UI:DoRefresh()
 
     f.money:SetText(PC:Money(GetMoney()))
     self:UpdateLimit()
-    f.onlyProfit:SetChecked(PC.db.onlyProfit)
-    f.onlyProfit.label = ("Only %s%%+ Auction profit"):format(PC:MinProfitPct()) -- follows the minimum in Settings
-    f.onlyProfitText:SetText(f.onlyProfit.label)
-    f.onlyVProfit:SetChecked(PC.db.onlyVProfit and true or false)
-    f.onlyVProfit.label = ("Only %s%%+ Vendor profit"):format(PC:MinProfitPct())
-    f.onlyVProfitText:SetText(f.onlyVProfit.label)
+    f.minProfit:Refresh()
     f.onlyAfford:SetChecked(PC.db.onlyAffordable ~= false)
 
     -- Status line (hidden behind the progress bar while scanning)
@@ -2125,9 +2137,9 @@ end
 UI.ROUTE_TEXT = { AH = "selling at auction", Vendor = "selling to a vendor", Disenchant = "disenchanting it" }
 -- what stops the Craftable at Profit count
 UI.CRAFT_WHY = { gold = "your gold or spending limit, deposits included", market = "Auction listings run out",
-    profit = "the next craft would lose money", max = "the plan limit", bags = "bag space" }
+    profit = "the next craft would make under your minimum profit", max = "the plan limit", bags = "bag space" }
 
--- Tooltip lines: how many you can craft at a profit, what stops it there, and each way's total
+-- Tooltip lines: how many you can craft at your minimum profit, what stops it there, and each way's total
 function UI:CraftableLines(e)
     local n, worth, spend, tAH, tV, why, est, nAH, nV = PC:Craftable(e)
     if not n then return { " ", "Craftable at Profit: |cff888888n/a (a price is missing)|r" } end
@@ -2143,7 +2155,8 @@ function UI:CraftableLines(e)
         if t == nil then return ("%s: |cff888888n/a|r"):format(label) end
         if (k or 0) <= 0 then
             local m = math.max(n, 1)
-            return ("%s: %s  |cffff8040(no profit this way: the loss on %d %s%s)|r"):format(label, PC:Money(t, true), m, unit, m == 1 and "" or "s")
+            return ("%s: %s  |cffff8040(%s this way: %d %s%s)|r"):format(label, PC:Money(t, true),
+                (t > 0 and not e.ahFlip) and "under your minimum" or "no profit", m, unit, m == 1 and "" or "s")
         end
         return ("%s: %s  |cff888888(%d %s%s)|r"):format(label, PC:Money(t, true), k, unit, k == 1 and "" or "s")
     end
@@ -2241,9 +2254,9 @@ function UI:CreateRecipesPage(p)
         { "profitPct", "Profit %", 48, "Profit as a % of material cost, at auction or to a vendor, whichever is higher.", fit = "pct" },
         { "listed", "Listed", 52, "How many are at auction now.", fit = "num" },
         { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction.", fit = "num" },
-        { "craftable", "Craftable at Profit", 64, "How many you can craft at a profit (auction or vendor) with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. The recipe's tooltip says how many clear your minimum profit, where buying stops. ~ = a material has no live listings.", fit = "num" },
-        { "totalAH", "Total Auction Profit", 84, "Auction Profit for every craft that still profits at auction, the whole batch at live listing prices.", fit = "gold" },
-        { "totalV", "Total Vendor Profit", 84, "Vendor Profit for every craft that still profits selling to a vendor, priced the same way.", fit = "gold" },
+        { "craftable", "Craftable at Profit", 64, "How many you can craft at your minimum profit, at auction or to a vendor (whichever is more), with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. ~ = a material has no live listings.", fit = "num" },
+        { "totalAH", "Total Auction Profit", 84, "Auction Profit for the crafts making your minimum profit at auction, the whole batch at live listing prices.", fit = "gold" },
+        { "totalV", "Total Vendor Profit", 84, "Vendor Profit for the crafts making your minimum profit at a vendor, priced the same way.", fit = "gold" },
     }
     cols.font = CELL_FONT
     self.recipeCols = cols
@@ -2419,7 +2432,7 @@ function UI:CreateRecipesPage(p)
             for _, line in ipairs(PC:SalesTooltip(e.outID or e.r.output)) do tip[#tip + 1] = line end
             tip[#tip + 1] = " "
             for _, l in ipairs(PC:DepthLines(e.outID or e.r.output)) do tip[#tip + 1] = l end
-            tip[#tip + 1] = "|cff888888Click: select   Shift-click: search the Auction House   Right-click: craft it   Shift-right-click: link|r"
+            tip[#tip + 1] = "|cff888888Click: search the Auction House   Double-click: how many   Right-click: craft it   Shift-right-click: link|r"
             ShowTooltip(btn, tip, e.outID or e.r.output)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -2452,6 +2465,7 @@ function UI:CreateRecipesPage(p)
                 end
                 if UI:ClickItem(e.outID or e.r.output, button) then return end
                 if button == "LeftButton" and PC.ahOpen then
+                    UI:SearchAH(e.outID or e.r.output) -- (first: its live listings wait for the AH's throttle)
                     PC.Depth:CheckNow(e.outID or e.r.output)
                     for _, rg in ipairs(e.r.reagents) do
                         local id = PC:ReagentFor(rg, e.mats)
@@ -2609,12 +2623,10 @@ function UI:UpdateRecipes()
         end
     end
 
-    -- Filter: "Only N%+ AH profit" and "Only N%+ V profit", each ticked box a condition (both ticked: both).
-    -- Vendor flips are judged the vendor way only (the AH box isn't used there).
+    -- Filter: only recipes making the minimum profit at auction or to a vendor (Vendor flips: to a vendor)
     local data = {}
-    local onlyAH, onlyV, minPct = PC.db.onlyProfit, PC.db.onlyVProfit, PC:MinProfitPct()
+    local minPct = PC:MinProfitPct()
     local vendorCat = self.category == "VENDOR"
-    local onlyMin = onlyV or (onlyAH and not vendorCat)
     self.hiddenAfford, self.hiddenMin = 0, 0
     for _, e in ipairs(self.allEntries) do
         local keep, meets
@@ -2622,13 +2634,13 @@ function UI:UpdateRecipes()
             keep, meets = e.score ~= nil, true
         elseif vendorCat then
             keep = e.vendorProfit and e.vendorProfit > 0
-            meets = not onlyV or PC:MeetsMinV(e)
+            meets = PC:MeetsMinV(e)
         else
             keep = (self.category == "ALL" or e.r.prof == self.category)
-            meets = (not onlyAH or PC:MeetsMinAH(e)) and (not onlyV or PC:MeetsMinV(e))
+            meets = PC:MeetsMinAH(e) or PC:MeetsMinV(e)
         end
         if keep and self.search ~= "" and not e.r.name:lower():find(self.search, 1, true) then keep = false end
-        if keep and onlyMin and not meets then
+        if keep and not meets then
             keep = false
             self.hiddenMin = self.hiddenMin + 1
         end
@@ -2641,7 +2653,7 @@ function UI:UpdateRecipes()
     if vendorCat then
         for _, e in ipairs(self:AHFlips()) do
             if self.search == "" or e.r.name:lower():find(self.search, 1, true) then
-                if not onlyV or (e.profitPct or 0) >= minPct then data[#data + 1] = e
+                if (e.profitPct or 0) >= minPct then data[#data + 1] = e
                 else self.hiddenMin = self.hiddenMin + 1 end
             end
         end
@@ -2763,16 +2775,13 @@ function UI:UpdateRecipeRows()
         elseif self.category == "BEST" then
             msg = ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold today at least half as many as are listed. Scan the Auction House to find some."):format(minText)
         elseif self.category == "VENDOR" then
-            msg = hidMin and ("No vendor flips at %s+ Vendor profit right now.\nUntick \"Only %s+ Vendor profit\" to see smaller ones."):format(minText, minText)
+            msg = hidMin and ("No vendor flips at %s+ Vendor profit right now.\nLower Minimum profit %% to see smaller ones."):format(minText)
                 or hidAfford and affordMsg
                 or "No vendor flips right now.\nNo recipe sells to a vendor for more than its materials cost, and nothing at auction is below what a vendor pays."
         elseif self.search ~= "" then
             msg = "No recipes match your search."
         elseif hidMin then
-            local onlyAH, onlyV = PC.db.onlyProfit, PC.db.onlyVProfit
-            local boxes = (onlyAH and onlyV) and ("\"Only %s+ Auction profit\" or \"Only %s+ Vendor profit\""):format(minText, minText)
-                or ("\"Only %s+ %s profit\""):format(minText, onlyV and "V" or "AH")
-            msg = ("Nothing here makes %s profit as ticked.\nScan the Auction House, or untick %s."):format(minText, boxes)
+            msg = ("Nothing here makes %s profit.\nScan the Auction House, or lower Minimum profit %%."):format(minText)
         elseif hidAfford then
             msg = affordMsg
         end

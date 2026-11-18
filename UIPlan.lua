@@ -287,7 +287,7 @@ function UI:CreateQtyPopup()
         ShowTooltip(b, { "Max", "The most your gold (or spending limit) and bags allow, at any profit." })
     end)
     q.max:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    -- Max profitable: the most that fit AND still make a profit, every craft priced up the listings
+    -- Max profitable: the most that fit AND make the minimum profit, every craft priced up the listings
     q.maxProfit = CreateFrame("Button", nil, q, "UIPanelButtonTemplate")
     q.maxProfit:SetSize(140, 22)
     q.maxProfit:SetPoint("LEFT", q.max, "RIGHT", 6, 0)
@@ -296,9 +296,8 @@ function UI:CreateQtyPopup()
         if e then eb:SetText(tostring(math.max(UI:MaxProfitable(e), 1))); UI:UpdateQtyPopup() end
     end)
     q.maxProfit:SetScript("OnEnter", function(b)
-        ShowTooltip(b, { "Max profitable", "The most your gold, bags and plan allow while every craft still makes a profit",
-            "(auction or vendor), at live listing prices.",
-            ("|cff888888Buying stops at your %d%% minimum profit.|r"):format(PC:MinProfitPct()) })
+        ShowTooltip(b, { "Max profitable", ("The most your gold, bags and plan allow while every craft makes your %d%% minimum profit"):format(PC:MinProfitPct()),
+            "(auction or vendor, whichever is more), at live listing prices." })
     end)
     q.maxProfit:SetScript("OnLeave", function() GameTooltip:Hide() end)
     q.info = q:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -421,8 +420,8 @@ function UI:UpdateQtyPopup()
     q.add:SetEnabled(n > 0 and ok)
 end
 
--- The most crafts of a recipe to add that fit the plan (gold, bags) and where every craft still makes a
--- profit (Craftable at Profit, less what the plan already holds of it). maxFit: MaxMoreFitting, if known.
+-- The most crafts of a recipe to add that fit the plan (gold, bags) and where every craft still
+-- makes the minimum profit (Craftable at Profit, less what the plan already holds of it). maxFit: MaxMoreFitting, if known.
 function UI:MaxProfitable(e, maxFit)
     if not e then return 0 end
     maxFit = maxFit or self:MaxMoreFitting(e.id, true)
@@ -513,7 +512,7 @@ function UI:CreateShoppingPage(p)
     local cols = {
         { "name", "Recipe", nil, "The hammer opens it in your profession window.", text = true },
         { "planCount", "How many", 96, "How many crafts are planned. Type a number, or use - and +." },
-        { "craftable", "Craftable at Profit", 70, "How many you can craft at a profit with your materials and gold (or spending limit), buying the rest at live listing prices. Buying stops sooner, at your minimum profit.", fit = "num" },
+        { "craftable", "Craftable at Profit", 70, "How many you can craft at your minimum profit, at auction or to a vendor (whichever is more), with your materials and gold (or spending limit), buying the rest at live listing prices.", fit = "num" },
         { "mats", "Materials to buy", 84, "Cost of the materials still to buy (what you have counts first).", fit = "gold" },
         { "ahProfit", "Auction Profit", 92, "Auction Profit for all planned crafts, materials at live listing prices, after the 5% auction cut.", fit = "gold" },
         { "vendorProfit", "Vendor Profit", 92, "Vendor Profit for all planned crafts, priced the same way.", fit = "gold" },

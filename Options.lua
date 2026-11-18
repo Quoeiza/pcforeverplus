@@ -88,55 +88,6 @@ local function Check(inst, panel, anchor, label, note, get, set)
     return spacer
 end
 
--- A setting typed in as a whole number (kept between lo and hi), with a note under it like the switches
-local function NumberRow(inst, panel, anchor, label, note, get, set, lo, hi)
-    local row = CreateFrame("Frame", nil, panel)
-    row:SetSize(620, 22)
-    row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -6)
-    local eb = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
-    eb:SetSize(40, 20)
-    eb:SetPoint("LEFT", 6, 0)
-    eb:SetAutoFocus(false)
-    eb:SetNumeric(true)
-    eb:SetMaxLetters(4)
-    eb:SetJustifyH("CENTER")
-    local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    text:SetPoint("LEFT", eb, "RIGHT", 8, 0)
-    text:SetText(label)
-    local function shown() local ok, v = pcall(get); return tostring(ok and v or "") end
-    local function apply()
-        local v = tonumber(eb:GetText())
-        if v then
-            v = math.max(lo, math.min(hi, math.floor(v)))
-            local okNow, cur = pcall(get)
-            if not (okNow and cur == v) then PC:Safe("setting: " .. label, set, v) end
-        end
-        eb:SetText(shown())
-        Options:RefreshAll()
-    end
-    eb:SetScript("OnEnterPressed", function(b) b:ClearFocus() end) -- (losing the focus applies it)
-    eb:SetScript("OnEditFocusLost", apply)
-    eb:SetScript("OnEscapePressed", function(b) b:SetText(shown()); b:ClearFocus() end)
-    eb:SetText(shown())
-    inst.checks[#inst.checks + 1] = {
-        get = get,
-        SetChecked = function(_, v) if not (eb.HasFocus and eb:HasFocus()) then eb:SetText(tostring(v or "")) end end,
-    }
-    local sub
-    if note then
-        sub = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        sub:SetPoint("TOPLEFT", text, "BOTTOMLEFT", 0, -2)
-        sub:SetWidth(560)
-        sub:SetJustifyH("LEFT")
-        sub:SetText(note)
-    end
-    local spacer = CreateFrame("Frame", nil, panel)
-    local noteH = sub and sub.GetStringHeight and sub:GetStringHeight() or 0
-    spacer:SetSize(1, note and math.max(14, (noteH or 0) + 6) or 1)
-    spacer:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, 0)
-    return spacer
-end
-
 local function Heading(panel, anchor, text, gap)
     local h = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     h:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(gap or 18))
@@ -347,10 +298,6 @@ function Options:BuildInto(root, withTitle)
         PC:ForgetStopList()
         PC:RefreshUI()
     end
-    a = NumberRow(inst, panel, a, "Minimum profit (% of material cost)",
-        "Recipes below it are hidden (untick the profit boxes to see them), and buying stops before a craft drops below it. Default 10. Skill up and Gear upgrades plans ignore it.",
-        function() return PC:MinProfitPct() end,
-        function(v) PC.db.minProfitPct = v; profitChanged() end, 0, 1000)
     a = Check(inst, panel, a, "Only recommend auction crafts that sold today",
         "Best bets, Make me gold and Have materials skip auction crafts with no sales today. Vendor flips and disenchanting are unaffected.",
         function() return PC.db.needSalesToday ~= false end,

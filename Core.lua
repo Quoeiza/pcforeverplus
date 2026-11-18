@@ -146,12 +146,10 @@ local function InitDB()
     db.hideExp = db.hideExp or {}      -- [expansion id] = true: don't scan or show that expansion's recipes    -- [faction][itemID] = last time we saw one sell (kept for good, unlike supplyHist)
     db.lastScanStart = db.lastScanStart or 0
     if db.autoScan == nil then db.autoScan = true end
-    if db.onlyProfit == nil then db.onlyProfit = true end
     -- the minimum profit (percent of the materials cost): lists hide recipes under it and buying stops
-    -- before a craft would make less (Settings > Crafting and plans)
+    -- before a craft would make less (the Minimum profit % box on the Recipes and Learn pages)
     if type(db.minProfitPct) ~= "number" then db.minProfitPct = PC.MIN_PROFIT_DEFAULT end
-    -- the lists now hide recipes under the minimum profit: switched on once for everyone
-    if not db.minProfitFilter then db.onlyProfit, db.minProfitFilter = true, true end
+    db.onlyProfit, db.onlyVProfit, db.minProfitFilter = nil, nil, nil -- old profit boxes (removed)
     -- recommendations (Best bets, Make me gold, Have materials) leave out AH crafts nobody bought today
     if db.needSalesToday == nil then db.needSalesToday = true end
     db.uiStyle, db.reopenTab = nil, nil              -- old window-style setting (removed)
@@ -2855,10 +2853,10 @@ function PC:CraftIncome(e)
 end
 
 -- Craftable at Profit: how many crafts of a recipe your materials (bags, bank, mail) and your budget
--- cover, buying the rest cheapest first at real listing prices, while every craft still makes a profit
--- (on the AH or to a vendor, whichever lasts longer). Returns:
+-- cover, buying the rest cheapest first at real listing prices, while every craft still makes the
+-- minimum profit (on the AH or to a vendor, whichever lasts longer). Returns:
 --   n, worth and spend for those n (materials: yours at today's price, the rest at what they'd cost;
---   the gold it takes), Total AH Profit (only the crafts still at a profit on the AH: nAH of them),
+--   the gold it takes), Total AH Profit (only the crafts making the minimum on the AH: nAH of them),
 --   Total V Profit (the same to a vendor: nV), why it stops ("gold", "market", "profit", "max"),
 --   est (true when a material had no live listings: priced at its cheapest), nAH, nV
 -- nil when a material has no price, or there's no price to sell at.
@@ -3031,9 +3029,10 @@ function PC:BatchProfit(e, n)
         routeIn and (n * routeIn - worth) or nil, spend
 end
 
--- minPct nil: "at profit": the crafts that still make a profit, each way (on the AH, to a vendor, the way
--- it's sold), every craft priced as the batch climbs the listings. minPct a number: the way it's sold
--- must make at least that share of its materials' cost (CraftableAtMin, what buying will do).
+-- minPct nil: Craftable at Profit: the crafts that make the minimum profit, each way (on the AH, to a
+-- vendor, the way it's sold), every craft priced as the batch climbs the listings; the way that lasts
+-- longest counts. minPct a number: only the way it's sold, at that share of its materials' cost
+-- (CraftableAtMin, what buying will do).
 function PC:CraftableRaw(e, budget, minPct, noBags)
     local slots, est = self:BatchSlots(e)
     if not slots then return nil end
@@ -3106,10 +3105,11 @@ function PC:CraftableRaw(e, budget, minPct, noBags)
         n, why = search(routeIn, minPct)
         nAH, nV = n, n
     else
-        local nR, wR = search(routeIn, 0)
+        local pct = self:MinProfitPct()
+        local nR, wR = search(routeIn, pct)
         local wA, wV
-        nAH, wA = search(ahIn, 0)
-        nV, wV = search(vIn, 0)
+        nAH, wA = search(ahIn, pct)
+        nV, wV = search(vIn, pct)
         n, why = nR, wR
         if nAH > n then n, why = nAH, wA end
         if nV > n then n, why = nV, wV end
