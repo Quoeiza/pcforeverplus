@@ -2607,32 +2607,35 @@ function PC:RecipeFor(itemID)
     return id, id and cdb.recipes[id] or nil
 end
 
--- What one costs when you make it: nil when you can't, when it's turned off, or when a price is missing
-function PC:CraftCost(itemID, depth)
+-- What one costs when you make `qty` of it (default 1), its materials bought for all of them up the real
+-- listings: nil when you can't, when it's turned off, or when a price is missing
+function PC:CraftCost(itemID, depth, qty)
     if cdb.vertical == false then return nil end
     depth = depth or 0
     local memo = self._memo
     if memo then
-        local key = "cc" .. tostring(itemID) .. ":" .. depth
+        local key = "cc" .. tostring(itemID) .. ":" .. depth .. ":" .. tostring(qty or 1)
         local hit = memo[key]
         if hit then return hit[1], hit[2], hit[3] end
-        local a, b, c = self:CraftCostRaw(itemID, depth)
+        local a, b, c = self:CraftCostRaw(itemID, depth, qty)
         memo[key] = { a, b, c }
         return a, b, c
     end
-    return self:CraftCostRaw(itemID, depth)
+    return self:CraftCostRaw(itemID, depth, qty)
 end
-function PC:CraftCostRaw(itemID, depth)
+function PC:CraftCostRaw(itemID, depth, qty)
     if depth > 2 then return nil end -- cloth -> bolt -> shirt is as deep as it goes
     local id, r = self:RecipeFor(itemID)
     if not r or not r.reagents or #r.reagents == 0 then return nil end
+    local yield = math.max(r.qty or 1, 1)
+    local crafts = math.max(math.ceil((qty or 1) / yield - 1e-9), 1)
     local cost = 0
     for _, rg in ipairs(r.reagents) do
-        local _, c = self:BestReagent(rg, depth + 1)
+        local _, c = self:BestReagent(rg, depth + 1, crafts)
         if not c then return nil end
-        cost = cost + c * rg.n
+        cost = cost + c * rg.n * crafts
     end
-    return cost / math.max(r.qty or 1, 1), id, r
+    return cost / (crafts * yield), id, r
 end
 
 -- The cheapest item that can fill a material slot: id, price per item, where to get it
@@ -2657,12 +2660,14 @@ function PC:PushUndo(u)
     while #cdb.undo > 20 do table.remove(cdb.undo, 1) end
 end
 
-function PC:BestReagent(rg, depth)
+-- (mult: how many crafts it's for, default one: every amount is priced as a whole)
+function PC:BestReagent(rg, depth, mult)
     local bestID, bestCost, bestSrc
     local buyOnly = self:BuyOnly()
+    local qty = rg.n * (mult or 1)
     for _, id in ipairs(self:ReagentIDs(rg)) do
-        local c, src = self:UnitCostFor(id, rg.n)
-        local cc = (not buyOnly[id]) and self:CraftCost(id, depth) or nil
+        local c, src = self:UnitCostFor(id, qty)
+        local cc = (not buyOnly[id]) and self:CraftCost(id, depth, qty) or nil
         if cc and (not c or cc < c) then c, src = cc, "Craft" end
         -- dust/essence/shards: craft a green you know and disenchant it, when that's cheaper
         -- (only when the numbers show a saving, a quarter or more: it's more work than buying, and
@@ -2755,6 +2760,35 @@ function PC:LadderRaw(itemID)
     return { steps = steps, cq = cq, cc = cc, vendor = v, est = est }
 end
 
+-- A material you make (bolts for a vest): making m of it buys its materials for all m, each up its own
+-- listings (yours first). Its ladder is those materials: { craft = { yield, mats = { {id, n, have, unit,
+-- lad}, ... } } }. nil when you can't make it or a price is missing.
+-- shortcut: what you hold of a material is counted for each slot that uses it, so a recipe using cloth
+-- both directly and in its bolts counts your cloth twice; split holdings if such a recipe matters.
+function PC:CraftLadder(itemID, depth)
+    depth = depth or 0
+    if depth > 2 then return nil end
+    local memo = self._memo
+    local key = memo and ("clad" .. tostring(itemID) .. ":" .. depth)
+    if key and memo[key] ~= nil then return memo[key] or nil end
+    local _, r = self:RecipeFor(itemID)
+    local lad
+    if r and r.reagents and #r.reagents > 0 then
+        local mats, est = {}, false
+        for _, rg in ipairs(r.reagents) do
+            local id, unit, src = self:ReagentFor(rg, "low")
+            if not unit then mats = nil break end
+            local sub = (src == "AH" or src == "Vendor") and self:Ladder(id)
+                or (src == "Craft" and self:CraftLadder(id, depth + 1)) or self:FlatLadder(unit)
+            if sub.est then est = true end
+            mats[#mats + 1] = { id = id, n = rg.n, have = self:ReagentCount(rg), unit = unit, lad = sub }
+        end
+        if mats then lad = { steps = {}, cq = {}, cc = {}, est = est, craft = { yield = math.max(r.qty or 1, 1), mats = mats } } end
+    end
+    if key then memo[key] = lad or false end
+    return lad
+end
+
 -- A ladder with no listings: any amount at one price (made yourself, or a vendor)
 function PC:FlatLadder(price)
     if not price then return nil end
@@ -2762,9 +2796,25 @@ function PC:FlatLadder(price)
 end
 
 -- What buying n off a ladder costs: total, average each, the priciest each, how many couldn't be had
--- (nil when all can: only when nothing's left listed and no vendor sells it)
-function PC:LadderCost(lad, n)
+-- (nil when all can: only when nothing's left listed and no vendor sells it), and for a material you
+-- make, what it's worth (your own materials in it at today's price: the total is only the gold spent).
+-- skipID: leave that material out of a made one (what the rest of it costs).
+function PC:LadderCost(lad, n, skipID)
     if not lad or not n or n <= 0 then return 0, nil, nil, nil end
+    if lad.craft then
+        local crafts = math.ceil(n / lad.craft.yield - 1e-9)
+        local spend, worth, short = 0, 0, nil
+        for _, m in ipairs(lad.craft.mats) do
+            if m.id ~= skipID then
+                local need = crafts * m.n
+                local own = math.min(need, m.have)
+                local t, _, _, sh, w = self:LadderCost(m.lad, need - own, skipID)
+                if sh then short = (short or 0) + sh end
+                spend, worth = spend + t, worth + (w or t) + own * m.unit
+            end
+        end
+        return spend, spend / n, nil, short, worth
+    end
     local steps, cq, cc = lad.steps, lad.cq, lad.cc
     local last = #steps
     if last > 0 and n <= cq[last] then
@@ -2983,7 +3033,7 @@ function PC:BuyCrafts(e)
         for _, s in ipairs(slots) do
             local c = math.floor(s.have / math.max(s.n, 1))
             all = math.min(all or c, c)
-            if not s.lad.vendor then held = math.min(held or c, c) end
+            if not s.lad.vendor and not s.lad.craft then held = math.min(held or c, c) end
         end
         held = held or all or 0
         if j then res = { math.max(j, held), j, held, jwhy } end
@@ -2996,32 +3046,43 @@ end
 -- cheapest one (no live listings). nil when a material has no price.
 function PC:BatchSlots(e)
     if not e or not e.r or not e.r.reagents or not e.cost then return nil end
+    -- (asked for again and again while buying is worked out: once per refresh)
+    local memo = self._memo
+    local key = memo and ("bslots" .. tostring(e.id) .. ":" .. tostring(e.mats))
+    if key then
+        local hit = memo[key]
+        if hit == nil then hit = { self:BatchSlotsRaw(e) }; memo[key] = hit end
+        return hit[1], hit[2]
+    end
+    return self:BatchSlotsRaw(e)
+end
+function PC:BatchSlotsRaw(e)
     local mode = e.mats or "low"
     local slots, est = {}, false
     for _, rg in ipairs(e.r.reagents) do
         local id, unit, src, rank = self:ReagentFor(rg, mode)
         if not unit then return nil end
-        local lad = (src == "AH" or src == "Vendor") and self:Ladder(id) or nil
+        local lad = (src == "AH" or src == "Vendor") and self:Ladder(id) or (src == "Craft" and self:CraftLadder(id)) or nil
         lad = lad or self:FlatLadder(unit)
         if lad.est then est = true end
         local have = (mode == "high" and rank) and self:ItemCount(id) or self:ReagentCount(rg)
-        slots[#slots + 1] = { n = rg.n, have = have, unit = unit, lad = lad }
+        slots[#slots + 1] = { id = id, n = rg.n, have = have, unit = unit, lad = lad }
     end
     return slots, est
 end
 
 -- n crafts' materials: the gold to buy what you don't have, and what they're all worth (yours at
 -- today's price, the rest at what they'd cost). nil when the market doesn't have enough.
-function PC:BatchCost(slots, n)
+function PC:BatchCost(slots, n, skipID)
     local spend, worth = 0, 0
     for _, s in ipairs(slots) do
         local need = n * s.n
         local own = math.min(need, s.have)
         local buy = need - own
         if buy > 0 then
-            local total, _, _, short = self:LadderCost(s.lad, buy)
+            local total, _, _, short, w = self:LadderCost(s.lad, buy, skipID)
             if short then return nil end
-            spend, worth = spend + total, worth + total
+            spend, worth = spend + total, worth + (w or total)
         end
         worth = worth + own * s.unit
     end
@@ -3060,7 +3121,7 @@ function PC:CraftableRaw(e, budget, minPct, noBags)
     local most = self.MAX_CRAFTABLE
     for _, s in ipairs(slots) do
         local lad = s.lad
-        if not lad.vendor then
+        if not lad.vendor and not lad.craft then -- (one you make: its own materials' listings settle it)
             local listed = #lad.steps > 0 and lad.cq[#lad.steps] or 0
             most = math.min(most, math.floor((s.have + listed) / math.max(s.n, 1)))
         end
@@ -3214,7 +3275,35 @@ function PC:MaterialDemands(itemID, entries)
                 local limit = jwhy == "profit" and target or nil
                 local crafts = limit and math.min(want, limit) or want
                 demands[#demands + 1] = { e = e, n = rg.n, need = rg.n * crafts, cap = cap, free = free,
-                    heldCrafts = held or 0, cut = crafts < want }
+                    heldCrafts = held or 0, cut = crafts < want, crafts = crafts }
+            end
+        end
+        -- a material it makes first (bolts for a vest): what goes into that is held to this recipe too
+        local slots = routeIn and self:BatchSlots(e)
+        for i, s in ipairs(slots or {}) do
+            local cl = s.lad.craft
+            for _, m in ipairs(cl and cl.mats or {}) do
+                if m.id == itemID then
+                    local per = s.n * m.n / cl.yield -- of it per craft
+                    local target, j, held, jwhy = self:BuyCrafts(e)
+                    local function rest(k, cash)
+                        local o = othersAt(slots, i, k, cash)
+                        local a1, b1 = self:BatchCost({ s }, k, itemID)
+                        local a0, b0 = self:BatchCost({ s }, k - 1, itemID)
+                        if not (o and b1) then return nil end
+                        return o + (cash and (a1 - (a0 or 0)) or (b1 - (b0 or 0)))
+                    end
+                    local others = rest(math.max(j or 1, 1)) or 0
+                    local cap = (routeIn / (1 + minPct / 100) - others) / per
+                    local free = (routeIn - (rest(math.max(held or 1, 1), true) or others)) / per
+                    local want = e.planCount or 1
+                    local limit = jwhy == "profit" and target or nil
+                    local crafts = limit and math.min(want, limit) or want
+                    -- (what you hold of the made material already covers some: less of this to buy)
+                    local made = math.max(s.n * crafts - s.have, 0)
+                    demands[#demands + 1] = { e = e, n = per, need = math.ceil(made / cl.yield - 1e-9) * m.n, cap = cap,
+                        free = free, heldCrafts = held or 0, cut = crafts < want, crafts = crafts }
+                end
             end
         end
     end
@@ -3234,7 +3323,7 @@ function PC:AmendPlanToHeld(itemID)
     local changes, old = {}, {}
     for _, d in ipairs(self:MaterialDemands(itemID, self.UI:PlanEntries())) do
         local cur = plan[d.e.id] or 0
-        local crafts = math.min(cur, math.floor(d.need / math.max(d.n, 1)))
+        local crafts = math.min(cur, d.crafts or math.floor(d.need / math.max(d.n, 1)))
         if crafts < cur then
             old[d.e.id] = cur
             plan[d.e.id] = crafts > 0 and crafts or nil
@@ -3388,14 +3477,14 @@ end
 --   "low"  = the cheapest rank (usually the lowest quality)
 --   "high" = the highest quality rank, for the best crafted quality
 -- returns id, price each, where, rank (1 = lowest; nil when the material has no ranks)
-function PC:ReagentFor(rg, mode)
+function PC:ReagentFor(rg, mode, mult)
     local ranked = self:RankedReagentIDs(rg)
     if mode == "high" and #ranked > 1 then
         local id = ranked[#ranked]
-        local c, src = self:UnitCostFor(id, rg.n)
+        local c, src = self:UnitCostFor(id, rg.n * (mult or 1))
         return id, c, src, #ranked
     end
-    local id, c, src = self:BestReagent(rg)
+    local id, c, src = self:BestReagent(rg, nil, mult)
     local rank
     for i, rid in ipairs(ranked) do if rid == id then rank = i end end
     return id, c, src, (#ranked > 1) and rank or nil
@@ -3632,7 +3721,7 @@ function PC:ShoppingList(entry, crafts, mode)
     local list, total, missing = {}, 0, false
     for _, rg in ipairs(entry.r.reagents) do
         local need = rg.n * crafts
-        local id, unit, src, rank = self:ReagentFor(rg, mode)
+        local id, unit, src, rank = self:ReagentFor(rg, mode, crafts)
         -- top-quality plan: only that rank counts as "have"; cheap plan: any rank you own counts
         local have = (mode == "high" and rank) and self:ItemCount(id) or self:ReagentCount(rg)
         local buy = math.max(need - have, 0)
