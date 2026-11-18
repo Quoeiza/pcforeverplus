@@ -2432,9 +2432,10 @@ function UI:CreateRecipesPage(p)
             if e.noSalesToday then tip[#tip + 1] = "|cffff8040No sales in the last day: not recommended for auction.|r" end
             -- a best bet: what it's ranked by
             if e.bestOK then
-                local score, k = PC:BestBetScore(e)
-                tip[#tip + 1] = ("|cff40ff40Best bet: about %s a day from %d craft%s%s.|r"):format(PC:Money(score or 0, false, true),
-                    k or 0, k == 1 and "" or "s", e.hot and ", a quarter more as it sold out over the last day" or "")
+                local score, k, p, secs = PC:BestBetScore(e)
+                tip[#tip + 1] = ("|cff40ff40Best bet: about %s an hour: %s profit from %d craft%s in about %d min, buying and posting included%s.|r"):format(
+                    PC:Money(score or 0, false, true), PC:Money(p or 0, false, true), k or 0, k == 1 and "" or "s",
+                    math.max(math.floor((secs or 0) / 60 + 0.5), 1), e.hot and ", a quarter more as it sold out over the last day" or "")
             end
             if e.route == "Vendor" and e.profit and e.profit > 0 then
                 tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. Instant gold, no auction.|r"
@@ -2572,7 +2573,7 @@ function UI:CreateRecipesPage(p)
         UI.offset = 0
         UI:Redraw()
     end)
-    resort:SetScript("OnEnter", function(b) ShowTooltip(b, { "Best bet order", "Sorts the best bets again, most likely gold first, with the latest prices." }) end)
+    resort:SetScript("OnEnter", function(b) ShowTooltip(b, { "Best bet order", "Sorts the best bets again, most gold an hour first, with the latest prices." }) end)
     resort:SetScript("OnLeave", function() GameTooltip:Hide() end)
     resort:Hide()
     self.bestResort = resort
