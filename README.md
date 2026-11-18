@@ -1,6 +1,6 @@
 # ProfitCrafter Forever Plus
 
-Version 0.4.2. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
+Version 0.4.3. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
 The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
@@ -16,10 +16,10 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - "Only profitable" is replaced by a Minimum profit % box on the Recipes and Learn pages, 10% by default. The tables always hide recipes that make less than it both at auction and at a vendor. Skill up and Gear upgrades plans ignore it.
 - New Craftable at Profit, Total Auction Profit and Total Vendor Profit columns. Craftable at Profit counts the crafts that make your minimum profit, at auction or at a vendor, whichever gives more. They price the whole batch against the real listings, not just the cheapest one, and allow for your gold, what is listed, your bag space and auction deposits.
 - The "how many?" pop-up and the Crafting plan price batches the same way and show both profits. The pop-up has a Max profitable button and says where buying will stop.
-- Best bets only shows recipes that make the minimum profit. A recipe sold at auction also has to have sold today, at least half as many as are listed. Hot sellers, with more sold today than listed, come first, then the rest by profit.
+- Best bets only shows recipes that make the minimum profit and, for auction, sold at least half as many in the last 24 hours as are listed. They're ranked by the profit you can realistically make in a day: as many crafts as the market takes from you and you can make, priced like the totals. One that sold out over the last day, not because of a buyout, scores a quarter more. The recipe tooltip shows its score.
 - Make me gold uses the same rules for its picks and its Your materials list, and shows both profits on every line and in the totals.
-- Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold today.
-- New setting to only recommend auction recipes that sold today, on by default. A recipe with no sales today shows an orange 0 and a note in its tooltip.
+- Have materials only plans recipes that make the minimum profit, and auction recipes only if they sold in the last day.
+- New setting to only recommend auction recipes that sold in the last day, on by default. A recipe with no sales in the last day shows an orange 0 and a note in its tooltip.
 - Auction flips fill every column, are labelled as flips and have a fuller tooltip.
 - A sell price that has spiked well above what the item usually sells for (a buyout leaving a few overpriced listings, say) is counted at no more than 1.5 times its usual sale price, in every profit, table, Best bets and Make me gold. The Sells at auction cell turns orange and the tooltip explains. The usual price comes from the sales your scans see, needs a day of them, and follows a real price rise within a day.
 - ProfitCrafter users share what their plans will put on the Auction House (crafts still to do, and items made but not yet posted), when a plan changes and again when it's gone. The advice allows for it but never blocks anything. The recipe tooltip says what's coming, Best bets ranks those recipes lower, and the "how many?" pop-up, Make me gold and Quick Buy suggest a smaller batch, never less than half. Vendor recipes aren't affected.
@@ -125,6 +125,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - On newer clients, recipes read from the profession window lost their required materials, so Learn page profits came out too high.
 - Trainer windows were never read on WoW Forever, so a trainer recipe with no named trainer sent you to the nearest trainer of that profession, whether or not it teaches it. Trainer windows are now read, and a trainer you've visited is only suggested for what its window lists. A recipe the data lists only outside the cities is no longer swapped for a city trainer.
 - A trainer list shared by another player now names the trainer even if you've never been there (it said "Your trainer"). Lists are also passed on to players who were offline, and a list from a trainer outside the cities is no longer swapped for the trainer where you are.
+- Profession ranks you already have, such as Journeyman Cook at 300 skill, were suggested as recipes to train.
 - Goldthorn Tea is taught by Henry Stern in Razorfen Downs, and Smoked Desert Dumplings comes from the quest Sharing the Knowledge in Silithus. Both pointed to the city cooking trainers.
 - The crafting station check errored on clients without C_TradeSkillUI, and the undercut check errored on clients without C_AuctionHouse when Auctionator was installed.
 

@@ -298,7 +298,7 @@ function Options:BuildInto(root, withTitle)
         PC:ForgetStopList()
         PC:RefreshUI()
     end
-    a = Check(inst, panel, a, "Only recommend auction crafts that sold today",
+    a = Check(inst, panel, a, "Only recommend auction crafts that sold in the last day",
         "Best bets, Make me gold and Have materials skip auction crafts with no sales today. Vendor flips and disenchanting are unaffected.",
         function() return PC.db.needSalesToday ~= false end,
         function(v) PC.db.needSalesToday = v; profitChanged() end)

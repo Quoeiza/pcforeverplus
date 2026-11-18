@@ -352,6 +352,15 @@ local function DBKeys()
     return dbKeys
 end
 
+-- A profession's rank (Journeyman Cook, Expert Tailor): yours once your skill's cap has reached it. Trainer
+-- windows list it like a recipe, and lists other players share can't say you have it.
+ToLearn.RANKS = { Apprentice = 75, Journeyman = 150, Expert = 225, Artisan = 300, Master = 375 }
+local function RankHad(name, pr)
+    local rank = type(name) == "string" and name:match("^(%a+) %a+$")
+    local cap = rank and ToLearn.RANKS[rank]
+    return cap ~= nil and pr ~= nil and (pr.max or 0) >= cap
+end
+
 function ToLearn:ListRaw()
     self.trainerCache = {}
     local d = Data()
@@ -365,6 +374,7 @@ function ToLearn:ListRaw()
         local norm = self:Norm(name)
         local key = prof .. ":" .. norm
         if known[norm] or d.skip[key] then return end
+        if fields.source == "Trainer" and RankHad(name, profs[prof]) then return end
         -- a spell you already have (Disenchant)
         if not byKey[key] and fields.source == "Trainer" and SpellKnown(name) then known[norm] = true return end
         local e = byKey[key]

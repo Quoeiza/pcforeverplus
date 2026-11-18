@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.2" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.3" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
@@ -46,7 +46,7 @@ PC.MAX_CRAFTABLE = 9999      -- most crafts the Craftable column counts up to (a
 PC.SCAN_COOLDOWN = 15 * 60   -- Blizzard allows one full AH scan every 15 minutes
 PC.MAX_AFFORD_CHECK = 200    -- most crafts we'll check when working out what you can afford
 PC.QUICK_BATCH = 100         -- items per Auction House search in the normal scan (the most the game takes)
-PC.HOT_TIER = 1e12           -- (a best bet's score: hot sellers ahead of everything else)
+PC.HOT_BONUS = 1.25          -- a best bet that sold out over the last day scores a quarter more
 
 local BASIC_REAGENT = (Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic) or 1
 
@@ -2320,6 +2320,47 @@ function PC:SellAtPrice(itemID)
     return p
 end
 
+-- Are the listings far below their usual count (under a quarter of the middle of the last 3 days)? A buyout
+-- emptying them makes "more sold than listed" look like a hot seller.
+function PC:ListedLow(itemID, listed)
+    local sup = itemID and listed and self:SupplyHistory()[itemID]
+    if not sup or #sup < 4 then return false end
+    local since, qs = time() - 3 * 86400, {}
+    for _, p in ipairs(sup) do if p.t >= since then qs[#qs + 1] = p.q end end
+    if #qs < 4 then return false end
+    table.sort(qs)
+    return listed < qs[math.ceil(#qs / 2)] / 4
+end
+
+-- A best bet's score: the profit you can realistically make in a day.
+--   at auction: as many crafts as the market takes from you in a day (the market check: its sales, your
+--     share, what others have coming, what you hold) and no more than Craftable at Profit, the batch priced
+--     like Total Auction Profit (materials up the live listings)
+--   to a vendor: Craftable at Profit (a vendor takes any amount): its Total Vendor Profit
+--   disenchanted: the market check (the dust has to sell), at its profit each
+-- A quarter more when it sold out over the last day (e.hot). Returns the score and the crafts it counts;
+-- nil when it isn't a best bet. Worked out when Best bets is shown, once per recipe until prices change.
+function PC:BestBetScore(e)
+    if not (e and e.bestOK) then return nil end
+    if e._best then return e._best[1], e._best[2] end
+    local n, _, _, _, tV, _, _, nAH, nV = self:Craftable(e)
+    local cap = (e.route ~= "Vendor" and self.MakeGold) and self.MakeGold:MarketCap(e) or nil
+    local s, k = 0, 0
+    if e.route == "Vendor" then
+        k = nV or 0
+        s = k > 0 and (tV or 0) or 0
+    elseif e.route == "AH" then
+        k = math.min(nAH or 0, cap or nAH or 0)
+        s = k > 0 and (self:BatchProfit(e, k) or 0) or 0
+    else
+        k = math.min(n or 0, cap or n or 0)
+        s = (e.profit or 0) * k
+    end
+    if e.hot then s = s * self.HOT_BONUS end
+    e._best = { s, k }
+    return s, k
+end
+
 -- Exactly how many you sold yourself (from your Profit & loss history)
 function PC:MySales(itemName, seconds)
     if not itemName then return 0 end
@@ -2980,7 +3021,7 @@ function PC:SellThroughOf(route, listed, soldToday)
 end
 function PC:SellThrough(e)
     if not e then return false, false, nil end
-    return self:SellThroughOf(e.route, e.listed, e.soldToday)
+    return self:SellThroughOf(e.route, e.listed, e.soldDay or e.soldToday)
 end
 
 -- The same, one way of selling: on the AH (after its cut) or to a vendor (the recipe tables' two boxes)
@@ -2995,7 +3036,7 @@ end
 -- (Settings: "Only recommend AH crafts that sold today")
 function PC:SalesOK(e)
     if not e or e.route ~= "AH" or not (db and db.needSalesToday ~= false) then return true end
-    return (e.soldToday or 0) > 0
+    return (e.soldDay or e.soldToday or 0) > 0
 end
 
 -- Is the plan in hand made to earn gold? (Skill up and Gear upgrades plans aren't: the minimum
@@ -3697,30 +3738,15 @@ function PC:AnalyzeRaw()
         local mine = self:MySales(self:ItemName(outID), today)
         local soldToday = math.max(est or 0, mine or 0)
         local profitPct = (profit and cost and cost > 0) and (profit / cost * 100) or nil
-        local score
-        -- best bets clear the minimum profit, and an AH craft only when some sold there today and at
-        -- least half as many sold today as are listed now (else it won't sell in the window you post it)
-        local salesOK = route ~= "AH" or not needSales or soldToday > 0
-        local sells, hot = self:SellThroughOf(route, listed, soldToday)
-        if profit and profit > 0 and profitPct and profitPct >= minPct and salesOK and sells then
-            -- profit potential: the profit on what the market buys in a day (at least one craft); hot
-            -- sellers (more sold today than listed) ahead of the rest
-            local per = math.max(r.qty or 1, 1)
-            local potential
-            if route == "Vendor" then
-                potential = profit * 20                         -- a vendor buys any amount: counted as 20 a day
-            elseif route == "Disenchant" then
-                potential = profit / 2                          -- the dust still has to sell
-            elseif soldToday > 0 then
-                potential = profit * math.max(soldToday / per, 1)
-                -- other ProfitCrafter users' plans will put more on the AH: ranked lower, never under half
-                local coming = self:ComingSupply(outID, soldToday)
-                if coming > 0 then potential = potential * math.max(0.5, soldToday / (soldToday + coming)) end
-            else
-                potential = profit / 3                          -- nothing to go on: be cautious
-            end
-            score = potential + (hot and self.HOT_TIER or 0)
-        end
+        -- the last 24 hours decide (since midnight knows next to nothing just after it)
+        local soldDay = math.max(self:SalesEstimate(outID, 86400) or 0, self:MySales(self:ItemName(outID), 86400) or 0)
+        -- best bets clear the minimum profit, and an AH craft only when some sold there in the last day and
+        -- at least half as many as are listed now (else it won't sell in the window you post it)
+        local salesOK = route ~= "AH" or not needSales or soldDay > 0
+        local sells, hot = self:SellThroughOf(route, listed, soldDay)
+        local bestOK = (profit and profit > 0 and profitPct and profitPct >= minPct and salesOK and sells) and true or nil
+        -- sold out over the last day, but not because a buyout emptied the listings
+        if hot and bestOK and self:ListedLow(outID, listed) then hot = false end
 
         out[#out + 1] = {
             id = recipeID,
@@ -3736,7 +3762,6 @@ function PC:AnalyzeRaw()
             route = route,
             deProfit = best.deProfit,
             listed = listed,
-            score = score,
             outID = outID,                            -- the exact item priced (which quality rank)
             quality = best.quality,                   -- rank you'll make (nil = item has no ranks)
             qualitySet = qualitySet and best == low,  -- true when you picked the rank yourself
@@ -3748,12 +3773,13 @@ function PC:AnalyzeRaw()
             profitPct = profitPct,                    -- return on the mats, the way it's sold
             ahProfitPct = (best.ahProfit and cost and cost > 0) and (best.ahProfit / cost * 100) or nil,
             vendorProfitPct = (best.vendorProfit and cost and cost > 0) and (best.vendorProfit / cost * 100) or nil,
-            noSalesToday = route == "AH" and soldToday <= 0 or nil, -- not recommended for the AH (see PC:SalesOK)
+            noSalesToday = route == "AH" and needSales and soldDay <= 0 or nil, -- none in the last day: not recommended (PC:SalesOK)
+            soldDay = soldDay,                        -- sold in the last 24 hours (the recommendations go by it)
+            bestOK = bestOK, hot = (bestOK and hot) or nil, -- a best bet (PC:BestBetScore ranks it); sold out over the last day
             lastSold = soldAt and (time() - soldAt) or nil,   -- seconds ago (sorts newest first)
             lastSoldDays = self:DaysAgo(soldAt),
             soldToday = soldToday,
             soldTodayKnown = est ~= nil or (mine or 0) > 0,
-            hot = (score ~= nil and hot) or nil,      -- a best bet selling faster than it's listed
             lastSoldMine = soldMine,
         }
     end

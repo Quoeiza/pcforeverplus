@@ -378,7 +378,7 @@ function UI:UpdateQtyPopup()
     local ah, v = PC:BatchProfit(e, math.max(n, 1))
     if n <= 0 then ah, v = 0, 0 end
     lines[#lines + 1] = ("Auction Profit: %s   Vendor Profit: %s"):format(PC:Money(ah, true), PC:Money(v, true))
-    if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
+    if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales in the last day: not recommended for auction.|r" end
     local qty = e.r.qty or 1
     lines[#lines + 1] = ("|cff888888Makes %s %s|r"):format(qty % 1 == 0 and tostring(qty * n) or ("about " .. math.floor(qty * n + 0.5)), e.r.name)
     local have = PC:CurrentPlan()[e.id]
@@ -632,7 +632,7 @@ function UI:CreateShoppingPage(p)
                 lines[#lines + 1] = ("%d crafts: Auction Profit %s, Vendor Profit %s"):format(e.planCount, PC:Money(ah, true), PC:Money(v, true))
                 lines[#lines + 1] = "|cff888888(the whole batch, at live listing prices)|r"
                 lines[#lines + 1] = ("Sells: %s"):format(e.route == "Vendor" and "|cff40c0ffto a vendor|r" or e.route == "Disenchant" and "|cffc080ffdisenchanted for dust|r" or "at auction")
-                if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
+                if e.noSalesToday then lines[#lines + 1] = "|cffff8040No sales in the last day: not recommended for auction.|r" end
                 for _, l in ipairs(UI:IngredientLines(e.r, e.mats)) do lines[#lines + 1] = l end
                 for _, l in ipairs(UI:CraftableLines(e)) do lines[#lines + 1] = l end
             end
@@ -866,7 +866,7 @@ function UI:CreateShoppingPage(p)
     haveBtn:SetScript("OnEnter", function(b)
         if b.none then return ShowTooltip(b, { "Have materials", ("Your materials don't make anything at %s%%+ profit right now."):format(PC:MinProfitPct()) }) end
         ShowTooltip(b, { "Have materials", ("Plans every recipe making %s%%+ profit that your materials already cover, as many as"):format(PC:MinProfitPct()),
-            "they make (auction crafts only if they sold today).",
+            "they make (auction crafts only if they sold in the last day).",
             "Best profit first, so shared materials go to the top earner." })
     end)
     haveBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)

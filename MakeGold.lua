@@ -261,8 +261,8 @@ function Gold:Build(budget, minSold)
     if not UI.allEntries then UI.allEntries = PC:Analyze() end
     local cands = {}
     for _, e in ipairs(UI.allEntries) do
-        -- at least the minimum profit, and nothing for the AH that nobody bought there today
-        -- (and for the AH, at least half as many sold today as are listed: else it won't sell in time)
+        -- at least the minimum profit, and nothing for the AH that nobody bought there in the last day
+        -- (and for the AH, at least half as many sold in the last day as are listed: else it won't sell in time)
         if e.profit and e.profit > 0 and e.cost and e.cost > 0 and PC:MeetsMin(e) and PC:SalesOK(e)
             and (PC:SellThrough(e))
             and not (PC.Learn and PC.Learn:Avoided(e.id))
@@ -283,8 +283,7 @@ function Gold:Build(budget, minSold)
                     local own = self:OwnCap(e.outID or e.r.output)
                     if own then cap = math.min(cap, own) end
                 end
-                local _, hot = PC:SellThrough(e)
-                if cap > 0 then cands[#cands + 1] = { e = e, cap = math.min(cap, e.route == "Vendor" and self.FLIP_MAX or 200), perDay = perDay, hot = hot } end
+                if cap > 0 then cands[#cands + 1] = { e = e, cap = math.min(cap, e.route == "Vendor" and self.FLIP_MAX or 200), perDay = perDay, hot = e.hot } end
             end
         end
     end
@@ -292,15 +291,12 @@ function Gold:Build(budget, minSold)
     -- Best gold back for the gold you spend, counting how fast it sells: a small-margin item that
     -- sells out in a day (bolts of cloth) beats a big-margin one that sits on the AH for a week.
     -- (learned: purged or twice-unsold items rank lower until they sell again)
+    -- (sold out over the last day, not after a buyout: a quarter more, as in Best bets)
     local function score(c)
         local pen = PC.Learn and PC.Learn:Penalty(c.e.outID or (c.e.r and c.e.r.output)) or 0
-        return c.e.profit / c.e.cost * self:Turnover(c) * (1 - pen)
+        return c.e.profit / c.e.cost * self:Turnover(c) * (1 - pen) * (c.hot and PC.HOT_BONUS or 1)
     end
-    -- hot sellers (more sold today than listed) first, each group by that score
-    table.sort(cands, function(a, b)
-        if (a.hot and true or false) ~= (b.hot and true or false) then return a.hot and true or false end
-        return score(a) > score(b)
-    end)
+    table.sort(cands, function(a, b) return score(a) > score(b) end)
     local picks, chosen = {}, {}
     self.bagLimited = nil
     local free = PC:FreeBagSlots()

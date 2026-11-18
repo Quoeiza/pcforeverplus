@@ -2302,7 +2302,7 @@ function UI:CreateRecipesPage(p)
         { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
         { "profitPct", "Profit %", 48, "Profit as a % of material cost, at auction or to a vendor, whichever is higher.", fit = "pct" },
         { "listed", "Listed", 52, "How many are at auction now.", fit = "num" },
-        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: no sales today, so not recommended for auction.", fit = "num" },
+        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: none in the last day either, so not recommended for auction.", fit = "num" },
         { "craftable", "Craftable at Profit", 64, "How many you can craft at your minimum profit, at auction or to a vendor (whichever is more), with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. ~ = a material has no live listings.", fit = "num" },
         { "totalAH", "Total Auction Profit", 84, "Auction Profit for the crafts making your minimum profit at auction, the whole batch at live listing prices.", fit = "gold" },
         { "totalV", "Total Vendor Profit", 84, "Vendor Profit for the crafts making your minimum profit at a vendor, priced the same way.", fit = "gold" },
@@ -2429,7 +2429,13 @@ function UI:CreateRecipesPage(p)
             local sure = PC.db.vendorPaid and PC.db.vendorPaid[e.outID or e.r.output]
             tip[#tip + 1] = "Vendor Profit per craft: " .. PC:Money(e.vendorProfit, true)
                 .. ((e.vendorProfit and not sure) and " |cffff8040(not confirmed yet: sell one to a vendor to confirm it)|r" or "")
-            if e.noSalesToday then tip[#tip + 1] = "|cffff8040No sales today: not recommended for auction.|r" end
+            if e.noSalesToday then tip[#tip + 1] = "|cffff8040No sales in the last day: not recommended for auction.|r" end
+            -- a best bet: what it's ranked by
+            if e.bestOK then
+                local score, k = PC:BestBetScore(e)
+                tip[#tip + 1] = ("|cff40ff40Best bet: about %s a day from %d craft%s%s.|r"):format(PC:Money(score or 0, false, true),
+                    k or 0, k == 1 and "" or "s", e.hot and ", a quarter more as it sold out over the last day" or "")
+            end
             if e.route == "Vendor" and e.profit and e.profit > 0 then
                 tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. Instant gold, no auction.|r"
             end
@@ -2718,7 +2724,7 @@ function UI:UpdateRecipes()
     for _, e in ipairs(self.allEntries) do
         local keep, meets
         if self.category == "BEST" then
-            keep, meets = e.score ~= nil, true
+            keep, meets = e.bestOK == true, true
         elseif vendorCat then
             keep = e.vendorProfit and e.vendorProfit > 0
             meets = PC:MeetsMinV(e)
@@ -2754,6 +2760,7 @@ function UI:UpdateRecipes()
         if k == "sell" then return e.ahFlip and e.sellAH or e.sell end -- (an AH flip: its price on the AH)
         if k == "vendorSell" then return e.vendorSell end
         if k == "profitPct" then return (UI:BestPct(e)) end
+        if k == "score" then return (PC:BestBetScore(e)) end
         local ci = CRAFT_I[k]
         if ci then
             local n, _, _, tAH, tV, _, _, nAH, nV = PC:Craftable(e)
@@ -2864,7 +2871,7 @@ function UI:UpdateRecipeRows()
             and #PC.cdb.skipped[self.category] > 0 then
             msg = self.category .. " recipes make no item to sell, so they can't be priced.\nSee the Scanned items tab for details."
         elseif self.category == "BEST" then
-            msg = ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold today at least half as many as are listed. Scan the Auction House to find some."):format(minText)
+            msg = ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold at least half as many in the last day as are listed. Scan the Auction House to find some."):format(minText)
         elseif self.category == "VENDOR" then
             msg = hidMin and ("No vendor flips at %s+ Vendor profit right now.\nLower Minimum profit %% to see smaller ones."):format(minText)
                 or hidAfford and affordMsg
