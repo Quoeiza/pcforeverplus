@@ -239,7 +239,7 @@ function UI:UpdateItemChart()
     c.yTop:SetText(PC:ShortMoney(hi))
     c.yMid:SetText(PC:ShortMoney((hi + lo) / 2))
     c.yBot:SetText(PC:ShortMoney(lo))
-    local fmt = (span > 2 * 86400) and "%m/%d" or "%m/%d %H:%M"
+    local fmt = (span > 2 * 86400) and "%d/%m" or "%d/%m %H:%M"
     c.xFirst:SetText(date(fmt, t0))
     c.xLast:SetText(date(fmt, t1))
 
@@ -258,7 +258,7 @@ function UI:UpdateItemChart()
         local d = self:ItemChartDot(i)
         d:ClearAllPoints()
         d:SetPoint("CENTER", c, "BOTTOMLEFT", x, yy)
-        d.tip = { date("%A, %B %d  %H:%M", pt.t), "Price: " .. PC:Money(pt.p) }
+        d.tip = { date("%A %d %B  %H:%M", pt.t), "Price: " .. PC:Money(pt.p) }
         d:Show()
         if px then
             local l = self:ItemChartLine(i - 1)
@@ -478,7 +478,7 @@ function UI:CreatePnLPage(p)
     self.modeButtons = {}
     local modes = {
         { "app", "ProfitCrafter only", "Only what ProfitCrafter records: auction buys and sales, auction fees and vendor sales." },
-        { "all", "All gold", "Every change to your gold: quests, loot, repairs, mail, trades, the Auction House, everything.\nCounts from the moment this was added (v0.60), while you're logged in on this character." },
+        { "all", "All gold", "Every change to your gold: quests, loot, repairs, mail, trades, the Auction House, everything.\nOnly counted while you're logged in on this character." },
     }
     for i, m in ipairs(modes) do
         local b = CreateFrame("Button", nil, cp, "UIPanelButtonTemplate")
@@ -532,7 +532,7 @@ function UI:CreatePnLPage(p)
 
     -- Recent activity: the last few trades (sortable like every table), under its title
     local rp = Panel(p, 12, -(90 + CHART_H + 6), PW, 154)
-    Text(rp, "GameFontNormal", 12, -7):SetText("Recent Auction House activity")
+    Text(rp, "GameFontNormal", 12, -7):SetText("Recent activity")
     local tb = CreateFrame("Frame", nil, rp)
     tb:SetPoint("TOPLEFT", 0, -18)
     tb:SetPoint("BOTTOMRIGHT", 0, 0)
@@ -648,7 +648,7 @@ function UI:UpdatePnL()
     for i, row in ipairs(self.recentRows) do
         local e = recent[i]
         if e then
-            row.when:SetText(date("%m/%d %H:%M", e.t))
+            row.when:SetText(date("%d/%m %H:%M", e.t))
             local item = e.item or "Unknown item"
             if e.qty and e.qty > 1 then item = item .. " x" .. e.qty end
             row.item:SetText(item)
@@ -662,7 +662,7 @@ function UI:UpdatePnL()
                 row.kind:SetText("|cffff5555Bought|r")
                 row.amount:SetText(PC:Money(-e.amount))
             else
-                row.kind:SetText("|cffff8040AH fee|r")
+                row.kind:SetText("|cffff8040Auction fee|r")
                 row.amount:SetText(PC:Money(-e.amount))
             end
             row:Show()
@@ -704,7 +704,7 @@ function UI:UpdatePnL()
     for i = 1, nDays do
         local t = now - (nDays - i) * 86400
         local key = date("%Y-%m-%d", t)
-        buckets[i] = { label = date("%m/%d", t), when = t, sold = 0, bought = 0, fees = 0 }
+        buckets[i] = { label = date("%d/%m", t), when = t, sold = 0, bought = 0, fees = 0 }
         index[key] = i
     end
     if allGold then
@@ -766,7 +766,7 @@ function UI:UpdatePnL()
         end
         if allGold then
             bar.tip = {
-                date("%A, %B %d", b.when),
+                date("%A %d %B", b.when),
                 "Gold in: " .. PC:Money(b.sold),
                 "Gold out: " .. PC:Money(b.bought),
                 "Net that day: " .. PC:Money(b.net, true),
@@ -774,7 +774,7 @@ function UI:UpdatePnL()
             }
         else
             bar.tip = {
-                date("%A, %B %d", b.when),
+                date("%A %d %B", b.when),
                 "Sold: " .. PC:Money(b.sold),
                 "Bought: " .. PC:Money(b.bought),
                 "Fees: " .. PC:Money(b.fees),
@@ -819,8 +819,9 @@ end
 function UI:CreateSellPage(p)
     local intro = UI.Ink(Text(p, "GameFontHighlightSmall", 16, -62, PW - 8))
     intro:SetText("What you crafted from your plan (nothing else in your bags is touched). Price = the cheapest listing (no undercut), never below your cost" ..
-        " (then it says |cffff8040Hold|r). " .. UI.DIM .. "Keep: always have this many; with Keep in stock on, the plan tops itself up.|r")
+        " (then it says |cffff8040Hold|r). " .. UI.DIM .. "Keep: always have this many. With Keep stock topped up on (Settings), the plan crafts more when you run low.|r")
     intro:SetSpacing(2)
+    intro:SetWordWrap(true)
     local lp = Panel(p, 12, -96, PW, SELL_H)
     HeaderStrip(lp)
     local cols = {
@@ -892,7 +893,7 @@ function UI:CreateSellPage(p)
                 local m = r.mat
                 local tip = { m.name, ("%d in your bags, %d in your bank: the plan doesn't need them."):format(m.bags, m.bank),
                     "A vendor pays " .. PC:Money(m.each) .. " each.",
-                    m.keep and "|cffff8040Kept: untick means it stays.|r" or (m.bank > 0 and "|cff888888At the bank, the button takes them out; the next vendor buys them back.|r" or "|cff888888The next vendor buys them back.|r") }
+                    m.keep and "|cffff8040Kept: never sold. Tick it to sell it to a vendor.|r" or (m.bank > 0 and "|cff888888At the bank, the button takes them out; the next vendor buys them back.|r" or "|cff888888The next vendor buys them back.|r") }
                 return ShowTooltip(r, tip, m.id)
             end
             local it = r.item
@@ -908,11 +909,11 @@ function UI:CreateSellPage(p)
                 local ah, v = UI:SellProfits(it)
                 tip[#tip + 1] = ("All %d: Auction Profit %s, Vendor Profit %s"):format(it.have, PC:Money(ah, true), PC:Money(v, true))
             end
-            if it.vendor then tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. It pays more than the Auction House after its cut and deposit.|r" end
+            if it.vendor then tip[#tip + 1] = "|cff40c0ffBest: sell to any vendor. A vendor pays you more than the Auction House brings in after its cut and deposit.|r" end
             if it.tooCheap then tip[#tip + 1] = "|cffff8040It sells for under 1s at auction: not worth posting.|r"
             elseif it.hold then tip[#tip + 1] = "|cffff8040Auction prices are below your cost right now: holding it.|r" end
             tip[#tip + 1] = "|cff888888Shift-click: open it at the Auction House   Alt-click: price alert|r"
-            ShowTooltip(r, tip, it.id)
+            ShowTooltip(r, tip, it.id, nil, true)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
         row:SetScript("OnClick", function(r, button) if r.item then UI:ClickItem(r.item.id, button) end end)
@@ -1456,12 +1457,12 @@ function UI:UpdateLearn()
             row:Hide()
         end
     end
-    self.learnEmpty:SetText(#list == 0 and view == "trip" and "No stops on your trip yet.\nClick Back to recipes (top right), then use + on a recipe to add it (Go adds it as the first stop)." or #list == 0 and (#all == 0
+    self.learnEmpty:SetText(#list == 0 and view == "trip" and "No stops on your trip yet.\nClick Back to recipes, then use + on a recipe to add it (Go adds it as the first stop)." or #list == 0 and (#all == 0
         and "Nothing found yet.\nOpen your profession windows and visit trainers and vendors: what they teach and sell shows up here\n(other ProfitCrafter users' vendors show up too)."
-        or "Nothing matches these filters.") or "")
+        or "Nothing matches these filters.\nTry another view or source, or lower Minimum profit %.") or "")
     self.learnSummary:SetText(("%d you can get now  ·  %d soon%s"):format(nNow, nSoon,
         #trip > 0 and ("  ·  |cffffd100Trip: %d stop%s|r%s"):format(#trip, #trip == 1 and "" or "s",
-            view ~= "trip" and " (Trip shows the order)" or s.key and " (the numbers are the order you'll visit them)"
+            view ~= "trip" and " (Start my trip shows the order)" or s.key and " (the numbers are the order you'll visit them)"
             or " in the order you'll visit them") or ""))
     self.learnStart:Hide()
     self.learnClear:SetShown(#trip > 0)
@@ -1475,7 +1476,7 @@ local HISTORY_KINDS = {
     { "ALL", "All" }, { "buy", "Bought" }, { "sell", "Sold at auction" }, { "vendor", "Sold to vendor" }, { "fee", "Auction fees" },
 }
 local KIND_LABEL = {
-    buy = "|cffff5555Bought (auction)|r", sell = "|cff40ff40Sold (auction)|r", vendor = "|cff40c0ffSold (vendor)|r", fee = "|cffff8040AH fee|r",
+    buy = "|cffff5555Bought (auction)|r", sell = "|cff40ff40Sold (auction)|r", vendor = "|cff40c0ffSold (vendor)|r", fee = "|cffff8040Auction fee|r",
 }
 UI.historyKind, UI.historyOffset = "ALL", 0
 
@@ -1556,7 +1557,7 @@ function UI:CreateHistoryPage(p)
         row:SetScript("OnEnter", function(btn)
             local e = btn.entry
             if not e then return end
-            local tip = { e.item or "Unknown item", date("%m/%d/%Y %H:%M", e.t), KIND_LABEL[e.kind] or e.kind }
+            local tip = { e.item or "Unknown item", date("%d/%m/%Y %H:%M", e.t), KIND_LABEL[e.kind] or e.kind }
             if e.qty and e.qty > 1 then tip[#tip + 1] = ("%d for %s (%s each)"):format(e.qty, PC:Money(e.amount), PC:Money(e.each)) end
             if e.kind == "sell" then tip[#tip + 1] = "|cff888888Gold you got from the mail, after the 5% auction cut.|r" end
             tip[#tip + 1] = CLICK_HINT
@@ -1617,7 +1618,7 @@ function UI:UpdateHistoryRows()
         local e = data[i + self.historyOffset]
         row.entry = e
         if e then
-            row.when:SetText(date("%m/%d %H:%M", e.t))
+            row.when:SetText(date("%d/%m %H:%M", e.t))
             row.kind:SetText(KIND_LABEL[e.kind] or e.kind)
             row.item:SetText(e.item)
             row.qty:SetText(e.qty)
@@ -1634,7 +1635,7 @@ function UI:UpdateHistoryRows()
     end
     if #data == 0 then
         self.historyEmpty:SetText(#PC.cdb.ledger == 0 and
-            "Nothing recorded yet.\n\nAH buys show up when you take the item from the \"Auction won\" mail,\nAH sales when you take the gold from the \"Auction successful\" mail,\nand vendor sales as soon as you sell to a merchant."
+            "Nothing recorded yet.\n\nAuction buys show up when you take the item from the \"Auction won\" mail,\nauction sales when you take the gold from the \"Auction successful\" mail,\nand vendor sales as soon as you sell to a merchant."
             or "Nothing matches this filter.")
     else
         self.historyEmpty:SetText("")

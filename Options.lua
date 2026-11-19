@@ -299,7 +299,7 @@ function Options:BuildInto(root, withTitle)
         PC:RefreshUI()
     end
     a = Check(inst, panel, a, "Only recommend auction crafts that sold in the last day",
-        "Best bets, Make me gold and Have materials skip auction crafts with no sales today. Vendor flips and disenchanting are unaffected.",
+        "Best bets, Make me gold and Have materials skip auction crafts with no sales in the last day. Vendor flips and disenchanting are unaffected.",
         function() return PC.db.needSalesToday ~= false end,
         function(v) PC.db.needSalesToday = v; profitChanged() end)
     a = Check(inst, panel, a, "Open the window beside my profession window",
@@ -324,7 +324,7 @@ function Options:BuildInto(root, withTitle)
         function() return PC.db.deForMats ~= false end,
         function(v) PC.db.deForMats = v; if PC.UI then PC.UI.allEntries = nil end; PC:RefreshUI() end)
     a = Check(inst, panel, a, "Learn from my results",
-        "Items that keep coming back unsold get a smaller batch and a slightly deeper undercut; recipes you keep unticking and items you had to purge rank lower in Make me gold; a skipped undercut check is offered less often. /pc learned shows what it has learned.",
+        "Items that keep coming back unsold get a smaller batch; recipes you keep unticking and items you had to purge rank lower in Make me gold; a skipped undercut check is offered less often. /pc learned shows what it has learnt.",
         function() return PC.db.learn ~= false end,
         function(v) PC.db.learn = v; if PC.UI then PC.UI.allEntries = nil end; PC:RefreshUI() end)
 
@@ -422,7 +422,7 @@ function Options:BuildInto(root, withTitle)
     advNote:SetPoint("TOPLEFT", advLabel, "BOTTOMLEFT", 0, -3)
     advNote:SetWidth(540)
     advNote:SetJustifyH("LEFT")
-    advNote:SetText("Shows the advanced settings and every tab (Items, Sell, Learn, P&L, History).")
+    advNote:SetText("Shows the advanced settings and every page (Items, Sell, Scout recipes, Profit & loss, History).")
     -- the advanced settings sit inside the same box, which grows to hold them
     local adv = CreateFrame("Frame", nil, panel)
     adv:SetPoint("TOPLEFT", advBox, "TOPLEFT", 14, -58)

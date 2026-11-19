@@ -23,7 +23,8 @@ Steps.DEFAULT_ROWS = 14
 Steps.ROW_H = 18
 Steps.NOW_H = 24 -- the NOW line at the bottom
 
-local function Tag(cat) return ("|cff%s%s|r"):format(Steps.COLORS[cat] or "ffffff", cat) end
+Steps.LABEL = { AH = "Auction" } -- (what a category is called in the list)
+local function Tag(cat) return ("|cff%s%s|r"):format(Steps.COLORS[cat] or "ffffff", Steps.LABEL[cat] or cat) end
 Steps.Tag = Tag
 
 ---------------------------------------------------------------------------
@@ -263,6 +264,9 @@ function Steps:Undo()
     elseif u.kind == "sellskip" then
         PC.cdb.sellSkipUntil = nil
         say = "Selling is back."
+    elseif u.kind == "flips" then
+        -- skipped vendor flips: back with their counts (it says so itself)
+        if PC.Next and PC.Next.UndoFlipsSkip then PC.Next:UndoFlipsSkip() end
     elseif u.kind == "amend" then
         -- a plan cut back when buying stopped at the minimum profit: the counts it had come back
         local plan, names = PC:CurrentPlan(), {}
@@ -526,7 +530,7 @@ function Steps:Build()
     local planHasCrafts = next(PC:CurrentPlan() or {}) ~= nil
     for id, n in pairs(planHasCrafts and self:Skipped() or {}) do
         local r = PC.cdb.recipes[id]
-        if r then out[#out + 1] = { cat = "Craft", text = PC:CraftCount(n, r), recipeID = id, skipped = true } end
+        if r and not PC:CurrentPlan()[id] then out[#out + 1] = { cat = "Craft", text = PC:CraftCount(n, r), recipeID = id, skipped = true } end
     end
 
     -- 3b) greens made for their dust: disenchant them
@@ -741,8 +745,11 @@ function Steps:Create()
                     PC.UI.ShowTooltip(b, { b:GetChecked() and "Untick to keep this out of the purge" or "Tick to purge it too",
                         "Kept items sell only at a profit, as usual." })
                 else
-                    PC.UI.ShowTooltip(b, { b:GetChecked() and "Untick to skip this craft" or "Tick to craft it again",
-                        "Every other task adjusts: what to buy, where to go, what to sell." })
+                    local st = row.step
+                    local craft = st and (st.recipeID or (st.rm and st.rm.kind == "craft"))
+                    PC.UI.ShowTooltip(b, { b:GetChecked() and (craft and "Untick to skip this craft" or "Untick to skip this task")
+                        or (craft and "Tick to craft it again" or "Tick to bring it back"),
+                        st and st.rm and Steps:RemoveHint(st) or "Every other task adjusts: what to buy, where to go, what to sell." })
                 end
             end
         end)
@@ -969,7 +976,7 @@ function Steps:Draw()
             row.num:SetText(st.note and "|cffff8000!|r" or (i + off))
             local text = st.plain and st.text or (Tag(st.cat) .. " - " .. st.text)
             if st.skipped and st.leftover then text = Tag(st.cat) .. " - |cffc0c0c0" .. st.text .. "|r"
-            elseif st.skipped then text = "|cff707070" .. st.cat .. " - " .. st.text .. (st.purgeID and " (kept)" or " (skipped)") .. "|r" end
+            elseif st.skipped then text = "|cff707070" .. (Steps.LABEL[st.cat] or st.cat) .. " - " .. st.text .. (st.purgeID and " (kept)" or " (skipped)") .. "|r" end
             row.text:SetText(text)
             if st.recipeID or st.purgeID or st.leftover or st.rm or st.ghost then
                 row.check:Show()

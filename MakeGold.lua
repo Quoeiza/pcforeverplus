@@ -201,7 +201,7 @@ function Gold:MarketCapRaw(e)
     local more = mine * (fast and self.FAST_MORE or 2)
     if more > items then
         items = more
-        why[#why + 1] = ("%d of yours sold today: making more"):format(mine)
+        why[#why + 1] = ("%d of yours sold in the last day: making more"):format(mine)
     end
     return math.max(math.floor((items - holding) / per), 0), table.concat(why, ", ")
 end
@@ -230,10 +230,10 @@ function Gold:HoldCap(id)
         local more = fast and self.FAST_MORE or 2
         if gear then
             local most = fast and today * 2 or today
-            return math.max(self.TEST_GEAR, most), ("%d of yours sold today"):format(today)
+            return math.max(self.TEST_GEAR, most), ("%d of yours sold in the last day"):format(today)
         end
         return math.max(self.TEST_BATCH, today * more), fast and ("%d of yours sold within the hour: making more"):format(today)
-            or ("%d of yours sold today: making more"):format(today)
+            or ("%d of yours sold in the last day: making more"):format(today)
     end
     local recent = PC:SoldSince(id, time() - self.RETRY_DAYS * 86400)
     local test = gear and self.TEST_GEAR or self.TEST_BATCH
@@ -469,7 +469,8 @@ function Gold:Update()
     local keep = PC.db.goldSellBags == false
     local left, mats, sells = {}, {}, {}
     if not keep then
-        left, mats = self:Carrying(room), self:MatCrafts(picks, room)
+        mats = self:MatCrafts(picks, room)
+        left = self:Carrying(room, picks, mats)
         sells = self:MatSells(picks, mats, left, room)
     end
     self.left, self.mats, self.sells = left, mats, sells
@@ -615,14 +616,22 @@ function Gold:SellRoute(id, n, room)
 end
 
 -- what you're still carrying from an earlier plan (minus what you took off)
-function Gold:Carrying(room)
+function Gold:Carrying(room, picks, mats)
+    -- (what the crafts above use of it is theirs: only the rest is sold)
+    local used = {}
+    for _, list in ipairs({ picks or {}, mats or {} }) do
+        for _, x in ipairs(list) do
+            for _, o in ipairs(x.own or {}) do used[o.id] = (used[o.id] or 0) + o.n end
+        end
+    end
     local out = {}
     local okL, left = pcall(PC.Sell.LeftoverList, PC.Sell)
     for _, l in ipairs(okL and left or {}) do
-        if not self.skip.left[l.id] and #out < self.MAX_LEFT then
+        local n = l.n - (used[l.id] or 0)
+        if n > 0 and not self.skip.left[l.id] and #out < self.MAX_LEFT then
             local what, each = l.what, l.each
-            if what ~= "disenchant" then what, each = self:SellRoute(l.id, l.n, room) end
-            if what then out[#out + 1] = { id = l.id, n = l.n, name = l.name, what = what, each = each } end
+            if what ~= "disenchant" then what, each = self:SellRoute(l.id, n, room) end
+            if what then out[#out + 1] = { id = l.id, n = n, name = l.name, what = what, each = each } end
         end
     end
     return out
@@ -734,7 +743,8 @@ function Gold:Use()
     local plans = PC:Plans()
     plans["Make me gold"] = {}
     local cdb = PC.cdb
-    if cdb.skipCraft then cdb.skipCraft["Make me gold"] = nil end -- made fresh: nothing from last time stays skipped
+    -- made fresh: nothing from last time stays skipped, bought instead of made, or kept back
+    for _, k in ipairs({ "skipCraft", "buyOnly", "noSell" }) do if cdb[k] then cdb[k]["Make me gold"] = nil end end
     local plan = plans["Make me gold"]
     for _, p in ipairs(picks) do plan[p.e.id] = (plan[p.e.id] or 0) + p.n end
     for _, m in ipairs(mats) do plan[m.e.id] = (plan[m.e.id] or 0) + m.n end
@@ -749,8 +759,7 @@ function Gold:Use()
         made[l.id] = math.max(made[l.id] or 0, l.n)
         if l.what == "disenchant" and PC.Synergy and PC.Synergy.Queue then pcall(PC.Synergy.Queue, PC.Synergy, l.id, l.n) end
     end
-    local okL, allLeft = pcall(PC.Sell.LeftoverList, PC.Sell)
-    for _, l in ipairs(okL and allLeft or {}) do if not self.skip.left[l.id] then adopt(l) end end
+    for _, l in ipairs(left) do adopt(l) end
     for _, l in ipairs(sells) do adopt(l) end
     if PC.SellSnoozed and PC:SellSnoozed() then cdb.sellSkipUntil = nil end
     PC:SwitchPlan("Make me gold")

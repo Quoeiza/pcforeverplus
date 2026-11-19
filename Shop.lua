@@ -1202,10 +1202,11 @@ end
 
 -- the next listing worth buying: cheapest first, within the price cap (under a vendor's price), and
 -- never more than wanted (a listing can't be split)
-function Buy:NextListing(it, room)
+function Buy:NextListing(it, room, maxEach)
     local res = self.itemResults[it.id]
     if not res then return nil end
     local cap, v = self:Cap(it.id), self:VendorPrice(it.id)
+    if maxEach and (not cap or maxEach < cap) then cap = maxEach end
     room = room or it.qty or 1
     for i, r in ipairs(res.list) do
         if (not cap or r.unit <= cap) and (not v or r.unit < v) and r.qty <= room then return r, i, cap end
@@ -1221,9 +1222,9 @@ function Buy:BuyListing(it)
     if not self:HasListings(it.id) then return self:SearchAH(it) end
     local name = it.name or Name(it.id)
     -- how many: worked out now, never more than the plan still needs
-    local goal, _, why = self:Goal(it.id, it.qty)
+    local goal, maxEach, why = self:Goal(it.id, it.qty)
     if goal <= 0 then return self:SayGoal(it.id, name, 0, why) end
-    local r, i, cap = self:NextListing(it, goal)
+    local r, i, cap = self:NextListing(it, goal, maxEach)
     if not r then
         self.itemResults[it.id] = nil
         return self:Say(("|cffff8040No %s listed under %s each (in lots of %d or fewer) right now.|r"):format(name,
@@ -1284,7 +1285,7 @@ do
             hooksecurefunc(C_AuctionHouse, "PlaceBid", function(auctionID, amount)
                 PC:Safe("buying", function()
                     local a = Buy.seenAuction[auctionID]
-                    if a then Buy:Attempt(a.id, a.qty, amount or a.cost, "listing", auctionID) end
+                    if a and (amount or 0) >= (a.cost or 0) then Buy:Attempt(a.id, a.qty, amount or a.cost, "listing", auctionID) end
                 end)
             end)
         end

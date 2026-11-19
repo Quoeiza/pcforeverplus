@@ -113,7 +113,7 @@ function Strip:Button(i)
             ("%d listed at auction"):format(it.listed or 0) }
         if it.sold then tip[#tip + 1] = ("About %d sold in the last day"):format(it.sold) end
         tip[#tip + 1] = "|cff888888Click: price graph   Shift-click: search the Auction House|r"
-        if PC.UI and PC.UI.ShowTooltip then PC.UI.ShowTooltip(btn, tip, it.id) end
+        if PC.UI and PC.UI.ShowTooltip then PC.UI.ShowTooltip(btn, tip, it.id, nil, true) end
     end)
     b:SetScript("OnLeave", function()
         self.paused = false

@@ -247,7 +247,11 @@ function Synergy:ToDisenchant()
     for id in pairs(self:PlanIDs()) do want[id] = want[id] or 1 end
     -- never what the game won't disenchant (it'd sit on "Disenchant" forever)
     for id in pairs(want) do
-        if self:Blocked(id) then want[id] = nil; if PC.cdb.deQueue then PC.cdb.deQueue[id] = nil end end
+        if self:Blocked(id) then
+            want[id] = nil
+            -- (off the queue only when the game has said no for sure: a tooltip still loading isn't a no)
+            if PC.cdb.deQueue and (self.NEVER_DE[id] or (PC.db.noDE and PC.db.noDE[id] == true)) then PC.cdb.deQueue[id] = nil end
+        end
     end
     -- never anything the plan makes to sell (a wand going to the AH stays a wand): it comes off the
     -- queue too, so the step doesn't get stuck on it

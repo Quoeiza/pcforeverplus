@@ -668,7 +668,7 @@ function UI.ExpansionName(itemID)
     return PC:ExpansionName(PC:ExpansionOf(itemID))
 end
 
-ShowTooltip = function(owner, lines, itemID, noWrap)
+ShowTooltip = function(owner, lines, itemID, noWrap, ownHint)
     if not lines and not itemID then return end
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
     local start = 1
@@ -687,7 +687,7 @@ ShowTooltip = function(owner, lines, itemID, noWrap)
     if itemID then
         GameTooltip:AddLine(" ")
         UI.AddItemInfoLines(GameTooltip, itemID)
-        GameTooltip:AddLine(CLICK_HINT, 1, 1, 1, true)
+        if not ownHint then GameTooltip:AddLine(CLICK_HINT, 1, 1, 1, true) end
     end
     GameTooltip:Show()
     UI.SolidTooltip(GameTooltip)
@@ -1220,7 +1220,7 @@ function UI:Create()
     local cb2Text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     cb2Text:SetPoint("LEFT", cb2, "RIGHT", 2, 0)
     cb2Text:SetText("Can afford"); UI.Ink(cb2Text)
-    f.onlyAfford = cb2
+    f.onlyAfford, f.onlyAffordText = cb2, cb2Text
 
     f.status = UI.Ink(Text(f, "GameFontHighlightSmall", W - 12 - 300 + NAV, -37 - TICKER_H, 300, "RIGHT"), true)
 
@@ -1956,6 +1956,12 @@ function UI:ShowTab(n)
     if self.f.search and self.f.search.Instructions then
         self.f.search.Instructions:SetText(n == 5 and "Search history" or "Search recipes")
     end
+    -- the top row's filters only where they filter something: Recipes (Scout recipes has its own
+    -- Minimum profit % box), and the search on History too
+    local f = self.f
+    if f.minProfit then f.minProfit:SetShown(n == 1) end
+    if f.onlyAfford then f.onlyAfford:SetShown(n == 1); f.onlyAffordText:SetShown(n == 1) end
+    if f.search then f.search:SetShown(n == 1 or n == 5) end
     if self.UpdateNav then self:UpdateNav() end
     self:Redraw()
 end
@@ -2302,7 +2308,7 @@ function UI:CreateRecipesPage(p)
         { "vendorProfit", "Vendor Profit", 80, "Profit per craft selling to a vendor. Blue: set to sell to a vendor.", fit = "money" },
         { "profitPct", "Profit %", 48, "Profit as a % of material cost, at auction or to a vendor, whichever is higher.", fit = "pct" },
         { "listed", "Listed", 52, "How many are at auction now.", fit = "num" },
-        { "soldToday", "Sold today", 50, "Sales since midnight (0 if unknown). Orange 0: none in the last day either, so not recommended for auction.", fit = "num" },
+        { "soldDay", "Sold in 24h", 50, "Sales in the last 24 hours (0 if unknown). Orange 0: none, so not recommended for auction.", fit = "num" },
         { "craftable", "Craftable at Profit", 64, "How many you can craft at your minimum profit, at auction or to a vendor (whichever is more), with your materials, gold or spending limit and bag space, buying the rest at live listing prices. Matches Max profitable for an empty plan. ~ = a material has no live listings.", fit = "num" },
         { "totalAH", "Total Auction Profit", 84, "Auction Profit for the crafts making your minimum profit at auction, the whole batch at live listing prices.", fit = "gold" },
         { "totalV", "Total Vendor Profit", 84, "Vendor Profit for the crafts making your minimum profit at a vendor, priced the same way.", fit = "gold" },
@@ -2396,13 +2402,13 @@ function UI:CreateRecipesPage(p)
                     ("Auction Profit each: %s |cff888888(relisting it, after the 5%% auction cut)|r"):format(PC:Money(e.ahProfit, true)),
                 }
                 for _, l in ipairs(UI:CraftableLines(e)) do tip[#tip + 1] = l end
-                tip[#tip + 1] = ("Sold today: |cffffffff%d|r%s"):format(e.soldToday or 0, e.soldTodayKnown and "" or " |cff888888(not scanned today)|r")
+                tip[#tip + 1] = ("Sold in 24h: |cffffffff%d|r%s"):format(e.soldDay or 0, e.soldDayKnown and "" or " |cff888888(not scanned in the last 24h)|r")
                 tip[#tip + 1] = " "
                 for _, line in ipairs(PC:SalesTooltip(e.ahFlipID)) do tip[#tip + 1] = line end
                 tip[#tip + 1] = " "
                 for _, l in ipairs(PC:DepthLines(e.ahFlipID)) do tip[#tip + 1] = l end
                 tip[#tip + 1] = "|cff888888Click at the Auction House to buy those listed below what a vendor pays. They're sold at your next vendor.|r"
-                ShowTooltip(btn, tip, e.ahFlipID)
+                ShowTooltip(btn, tip, e.ahFlipID, nil, true)
                 return
             end
             local tip = { e.r.name }
@@ -2412,7 +2418,8 @@ function UI:CreateRecipesPage(p)
                     tip[#tip + 1] = ("Makes %s per craft: %s each = |cffffffff%s per craft|r."):format(
                         qty % 1 == 0 and tostring(qty) or ("%.1f"):format(qty), PC:Money(e.sellEach), PC:Money(e.sell))
                 else
-                    tip[#tip + 1] = "Sells for " .. PC:Money(e.sellEach) .. (e.spikeNow and " (counted at)." or " (cheapest listing).")
+                    tip[#tip + 1] = e.spikeNow and ("Counted at " .. PC:Money(e.sellEach) .. " each (the price listed now is a spike: see below).")
+                        or ("Sells for " .. PC:Money(e.sellEach) .. " (cheapest listing).")
                 end
             end
             -- a spiked price: what's listed now isn't what it sells at
@@ -2495,8 +2502,8 @@ function UI:CreateRecipesPage(p)
             else
                 tip[#tip + 1] = "Last sold: |cff888888? not seen yet (scan a few times)|r"
             end
-            tip[#tip + 1] = ("Sold today: |cffffffff%d|r%s"):format(e.soldToday or 0,
-                e.soldTodayKnown and "" or " |cff888888(not scanned today)|r")
+            tip[#tip + 1] = ("Sold in 24h: |cffffffff%d|r%s"):format(e.soldDay or 0,
+                e.soldDayKnown and "" or " |cff888888(not scanned in the last 24h)|r")
             -- what other ProfitCrafter users' plans will still put on the AH
             if e.route == "AH" then
                 local perDay = PC.MakeGold and PC.MakeGold:SoldPerDay(e)
@@ -2512,7 +2519,7 @@ function UI:CreateRecipesPage(p)
             tip[#tip + 1] = " "
             for _, l in ipairs(PC:DepthLines(e.outID or e.r.output)) do tip[#tip + 1] = l end
             tip[#tip + 1] = "|cff888888Click: open it at the Auction House   Double-click: how many   Right-click: craft it   Shift-right-click: link|r"
-            ShowTooltip(btn, tip, e.outID or e.r.output)
+            ShowTooltip(btn, tip, e.outID or e.r.output, nil, true)
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
@@ -2586,7 +2593,6 @@ end
 UI.AH_FLIP_MARGIN = 0.9
 function UI:AHFlips()
     local out = {}
-    local today = PC:SecondsToday()
     local prices, supply = PC:Prices(), PC:Supply()
     local sells = PC.db and PC.db.sellPrice or {}
     for id, sell in pairs(sells) do
@@ -2597,14 +2603,14 @@ function UI:AHFlips()
                 local n = supply[id]
                 -- (every column filled: listing it again on the AH would lose the cut, a vendor pays more)
                 local ahProfit = p * (1 - PC.AH_CUT) - p
-                local est = PC:SalesEstimate(id, today)
-                local mine = PC:MySales(name, today)
+                local est = PC:SalesEstimate(id, 86400)
+                local mine = PC:MySales(name, 86400)
                 out[#out + 1] = { id = -id, ahFlipID = id, ahFlip = true, outID = id,
                     r = { name = name, prof = "Auction flip", output = id, reagents = {}, qty = 1 },
                     cost = p, sell = sell, sellAH = p, vendorSell = sell, profit = sell - p, vendorProfit = sell - p,
                     ahProfit = ahProfit, ahProfitPct = ahProfit / p * 100, vendorProfitPct = (sell - p) / p * 100,
                     profitPct = (sell - p) / p * 100, route = "Vendor", listed = type(n) == "number" and n or nil,
-                    soldToday = math.max(est or 0, mine or 0), soldTodayKnown = est ~= nil or (mine or 0) > 0 }
+                    soldDay = math.max(est or 0, mine or 0), soldDayKnown = est ~= nil or (mine or 0) > 0 }
             end
         end
     end
@@ -2845,9 +2851,9 @@ function UI:UpdateRecipeRows()
             elseif n <= 5 then FitCell(c.listed, "|cff40ff40" .. n .. "|r")
             elseif n <= 20 then FitCell(c.listed, "|cffffff00" .. n .. "|r")
             else FitCell(c.listed, "|cffff5555" .. n .. "|r") end
-            local st = e.soldToday or 0
-            if st > 0 then FitCell(c.soldToday, "|cff40ff40" .. st .. "|r")
-            else FitCell(c.soldToday, e.noSalesToday and "|cffff80400|r" or "|cff8888880|r") end -- orange: not recommended for the AH
+            local st = e.soldDay or 0
+            if st > 0 then FitCell(c.soldDay, "|cff40ff40" .. st .. "|r")
+            else FitCell(c.soldDay, e.noSalesToday and "|cffff80400|r" or "|cff8888880|r") end -- orange: not recommended for the AH
             local cn, tah, tv = CraftableCells(e)
             FitCell(c.craftable, cn); FitCell(c.totalAH, tah); FitCell(c.totalV, tv)
             row.sel:SetShown(e.id == self.selected)
@@ -2873,7 +2879,7 @@ function UI:UpdateRecipeRows()
             and #PC.cdb.skipped[self.category] > 0 then
             msg = self.category .. " recipes make no item to sell, so they can't be priced.\nSee the Scanned items tab for details."
         elseif self.category == "BEST" then
-            msg = ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold at least half as many in the last day as are listed. Scan the Auction House to find some."):format(minText)
+            msg = hidAfford and affordMsg or (self.search ~= "" and "No recipes match your search.") or ("No best bets yet.\nA best bet makes at least %s profit and, for auction, sold at least half as many in the last day as are listed. Scan the Auction House to find some."):format(minText)
         elseif self.category == "VENDOR" then
             msg = hidMin and ("No vendor flips at %s+ Vendor profit right now.\nLower Minimum profit %% to see smaller ones."):format(minText)
                 or hidAfford and affordMsg

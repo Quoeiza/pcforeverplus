@@ -456,7 +456,9 @@ function UI:QuickBuy(e)
     local cur = plan[e.id] or 0
     local pct = PC:MinProfitPct()
     local target = PC:BuyCrafts(e)
-    local add = target and math.max(math.min(target - cur, self:MaxMoreFitting(e.id, true)), 0) or 0
+    local fit = self:MaxMoreFitting(e.id, true)
+    local add = target and math.max(math.min(target - cur, fit), 0) or 0
+    local limited = target and target - cur > fit -- (gold or bags stopped it, not the minimum profit)
     if add <= 0 and cur <= 0 then
         local why = (target and target > 0) and "none fit your gold or bags"
             or ("none make %d%% profit at today's prices"):format(pct)
@@ -471,8 +473,10 @@ function UI:QuickBuy(e)
     -- (bought before anything else: the purchase has to start inside this click)
     if main and PC.ahOpen then PC.Buy:Start({ id = main.id, name = main.name }, false, true) end
     local parts = {}
-    parts[#parts + 1] = add > 0 and ("Quick Buy: added %d %s (%d planned), all that make %d%% profit."):format(add, e.r.name, plan[e.id], pct)
-        or ("Quick Buy: %s already planned (%d); no more make %d%% profit."):format(e.r.name, cur, pct)
+    parts[#parts + 1] = add > 0 and (limited and ("Quick Buy: added %d %s (%d planned), all your gold and bags allow."):format(add, e.r.name, plan[e.id])
+            or ("Quick Buy: added %d %s (%d planned), all that make %d%% profit."):format(add, e.r.name, plan[e.id], pct))
+        or (limited and ("Quick Buy: %s already planned (%d); no more fit your gold or bags."):format(e.r.name, cur)
+            or ("Quick Buy: %s already planned (%d); no more make %d%% profit."):format(e.r.name, cur, pct))
     -- more than the market takes (its sales, what's listed, other ProfitCrafter users' plans): said, not stopped
     local cap, capWhy = PC.MakeGold and PC.MakeGold:MarketCap(e)
     if cap and (plan[e.id] or 0) > cap then
@@ -731,7 +735,8 @@ function UI:CreateShoppingPage(p)
                     row.buyItem.stopped, PC:MinProfitPct())
             end
             if not PC.ahOpen then tip[#tip + 1] = "|cffff8040Open the Auction House to buy.|r" end
-            tip[#tip + 1] = "First click gets the live price, the next click buys."
+            tip[#tip + 1] = PC.Buy:AutoConfirm() and "One click gets the live price and buys, if it's still profitable."
+                or "First click gets the live price, the next click buys."
             tip[#tip + 1] = "|cff888888Purchases go to your mailbox and count as \"have\" right away.|r"
             ShowTooltip(b, tip)
         end)
@@ -1423,7 +1428,7 @@ function UI:PlanFromBags()
         if PC:MeetsMin(e) and PC:SalesOK(e) then list[#list + 1] = e end
     end
     table.sort(list, function(a, b) return a.profit > b.profit end)
-    local added, crafts = 0, 0
+    local added, crafts, marketLimited = 0, 0, false
     for _, e in ipairs(list) do
         local can = math.huge
         for _, rg in ipairs(e.r.reagents) do
@@ -1432,12 +1437,22 @@ function UI:PlanFromBags()
         if can ~= math.huge and can > 0 then
             -- only as many as your bags have room for
             local cur = plan[e.id] or 0
-            while can > 0 and not self:PlanFits(e.id, cur + can) do can = can - 1 end
+            -- no more than the market takes (straight to it), then as many as your bags have room for
+            local ok, _, _, why, cap = self:PlanFits(e.id, cur + can)
+            if not ok and why == "market" then can = math.max(math.min(can, (cap or 0) - cur), 0) end
+            local stop = why
+            while can > 0 do
+                ok, _, _, why = self:PlanFits(e.id, cur + can)
+                if ok then break end
+                stop, can = why, can - 1
+            end
             if can > 0 then
                 for _, rg in ipairs(e.r.reagents) do use(rg, rg.n * can) end
                 plan[e.id] = math.min(cur + can, 9999)
                 added, crafts = added + 1, crafts + can
-            else
+            elseif stop == "market" then
+                marketLimited = true
+            elseif stop == "bags" then
                 self.bagLimited = true
             end
         end
@@ -1446,6 +1461,7 @@ function UI:PlanFromBags()
         PC.Print(("|cffff8040Some crafts were left out: not enough bag space (%d free slots).|r"):format(PC:FreeBagSlots()))
         self.bagLimited = nil
     end
+    if marketLimited then PC.Print("|cffff8040Some crafts were left out: the market only takes so many right now.|r") end
     if added == 0 then
         PC.Print(("Your materials don't make any more crafts at %s%%+ profit right now."):format(PC:MinProfitPct()))
     else
@@ -1796,7 +1812,10 @@ function UI:UpdateShopping()
     elseif #entries == 0 then
         self.shopSummary:SetText("")
     else
-        local spendText = missing and "|cffff5555unknown|r" or ((total > money and "|cffff5555" or "|cffffffff") .. PC:Money(total) .. "|r")
+        -- (posting deposits come out of your gold too, as the Task Button counts them)
+        local deposits = PC.PostReserve and PC:PostReserve(entries) or 0
+        local spendText = missing and "|cffff5555unknown|r" or ((total + deposits > money and "|cffff5555" or "|cffffffff") .. PC:Money(total) .. "|r"
+            .. (deposits > 0 and (" " .. UI.DIM .. "+ " .. PC:Money(deposits) .. " deposits|r") or ""))
         self.shopSummary:SetText(("Spend %s  " .. UI.DIM .. "(you have %s)|r   Auction Profit %s   Vendor Profit %s%s"):format(
             spendText, PC:Money(money), nAH > 0 and PC:Money(ahT, true) or PC:Money(nil), nV > 0 and PC:Money(vT, true) or PC:Money(nil),
             unknown > 0 and " " .. UI.DIM .. "(+" .. unknown .. " unpriced)|r" or ""))

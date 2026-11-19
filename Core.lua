@@ -30,7 +30,7 @@ function PC.Num(v)
     if v == nil or PC.IsSecret(v) or type(v) ~= "number" then return nil end
     return v
 end
-PC.BUILD = "0.4.7" -- stamped with the real version when the zip is built
+PC.BUILD = "0.4.8" -- stamped with the real version when the zip is built
 -- real arrows (pictures, not typed characters) for use inside text
 PC.ARROW_R = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowRight:12:12:0:0|t"
 PC.ARROW_L = "|TInterface\\AddOns\\" .. ADDON .. "\\Media\\ArrowLeft:12:12:0:0|t"
@@ -530,10 +530,7 @@ function PC:DropFinishedTempPlans()
     end
     for _, name in ipairs(gone) do
         plans[name] = nil
-        if cdb.planSaved then cdb.planSaved[name] = nil end
-        if cdb.planDone then cdb.planDone[name] = nil end
-        if cdb.planFin then cdb.planFin[name] = nil end
-        if cdb.skipCraft then cdb.skipCraft[name] = nil end
+        self:ForgetPlanData(name)
         if name == cur then cdb.planCurrent = nil end
     end
     if #gone > 0 then self:PlanName() end -- picks another (or makes an empty "My plan")
@@ -617,9 +614,8 @@ function PC:RenamePlan(newName)
         if n ~= old and n:lower() == newName:lower() then return false, ("There's already a plan called \"%s\"."):format(n) end
     end
     plans[newName], plans[old] = plans[old], nil
-    if cdb.planSaved then cdb.planSaved[newName], cdb.planSaved[old] = cdb.planSaved[old], nil end
-    if cdb.planDone then cdb.planDone[newName], cdb.planDone[old] = cdb.planDone[old], nil end
-    if cdb.planFin then cdb.planFin[newName], cdb.planFin[old] = cdb.planFin[old], nil end
+    self:ForgetPlanData(old, newName)
+    if cdb.planMadeN then cdb.planMadeN[newName], cdb.planMadeN[old] = cdb.planMadeN[old], nil end
     cdb.planCurrent = newName
     return true
 end
@@ -637,11 +633,22 @@ function PC:DeletePlan()
         self.ToLearn:Changed()
     end
     plans[name] = nil
-    if cdb.planSaved then cdb.planSaved[name] = nil end
-    if cdb.planDone then cdb.planDone[name] = nil end
-    if cdb.planFin then cdb.planFin[name] = nil end
+    self:ForgetPlanData(name)
     cdb.planCurrent = nil
     self:PlanName() -- picks another (or makes an empty "My plan")
+end
+
+-- A plan's own settings, kept by its name: what it skips, makes or buys, keeps, and its saved list.
+-- newName: moved to it (a rename); else gone (so a new plan with that name starts clean).
+PC.PLAN_KEYED = { "planSaved", "planDone", "planFin", "skipCraft", "buyOnly", "noSell" }
+function PC:ForgetPlanData(name, newName)
+    for _, k in ipairs(self.PLAN_KEYED) do
+        local t = cdb[k]
+        if t then
+            if newName then t[newName] = t[name] end
+            t[name] = nil
+        end
+    end
 end
 
 -- A profession's level (your real one; typed-in levels were removed with the Levels & gold tab)
@@ -1069,8 +1076,7 @@ end
 function PC:UpdateProfessions()
     local idxs = { GetProfessions() }
     local found = {}
-    for i = 1, 5 do
-        local idx = idxs[i]
+    for _, idx in pairs(idxs) do
         if idx then
             local name, _, rank, maxRank, _, _, skillLine = GetProfessionInfo(idx)
             if name and skillLine then
@@ -1744,6 +1750,10 @@ function PC:ProcessScan()
     self.processing = true
 
     local total = C_AuctionHouse.GetNumReplicateItems() or 0
+    if total == 0 then
+        -- (nothing came back: wiping every price would also count everything as just sold)
+        return self:EndScan(false, "The full scan came back empty: your prices are kept. Try again in a moment.", "Full scan came back empty.")
+    end
     local prices, qty, i = {}, {}, 0
     local samples = {} -- [itemID] = { {b = buyout, c = count}, ... } to work out how the game reports the price
     self.progress = 0
@@ -2215,13 +2225,6 @@ function PC:LastSold(itemID)
     local s = name and self:SellIndex()[name]
     if s and (not best or s.last >= best) then best, mine = s.last, true end
     return best, mine
-end
-
--- Seconds since local midnight
-function PC:SecondsToday()
-    local d = date("*t")
-    if type(d) ~= "table" then return 86400 end
-    return math.max(60, (d.hour or 0) * 3600 + (d.min or 0) * 60 + (d.sec or 0))
 end
 
 -- Whole days since a time (0 = today)
@@ -3038,22 +3041,22 @@ function PC:MeetsMin(e)
     return e ~= nil and e.profitPct ~= nil and e.profit ~= nil and e.profit > 0 and e.profitPct >= self:MinProfitPct()
 end
 
--- Does an AH craft really sell? What sold today against what's listed now: fewer than half as many sold
+-- Does an AH craft really sell? What sold in the last 24 hours against what's listed now: fewer than half as many sold
 -- as are listed won't sell in the window you post it (not a best bet, not for Make me gold); more sold
 -- than listed is a hot seller (those come first). A vendor buys on the spot and disenchanting isn't
 -- sold as the item: neither is held to it. Returns ok, hot, sold/listed (nil when it can't be told).
 PC.SELL_THROUGH_MIN = 0.5
-function PC:SellThroughOf(route, listed, soldToday)
+function PC:SellThroughOf(route, listed, sold)
     if route ~= "AH" then return true, false, nil end
-    soldToday = soldToday or 0
-    if listed == nil then return true, false, nil end -- (not scanned yet: the sold-today rule decides)
-    if listed <= 0 then return true, soldToday > 0, nil end
-    local r = soldToday / listed
-    return r >= self.SELL_THROUGH_MIN, soldToday > listed, r
+    sold = sold or 0
+    if listed == nil then return true, false, nil end -- (not scanned yet: the needs-sales rule decides)
+    if listed <= 0 then return true, sold > 0, nil end
+    local r = sold / listed
+    return r >= self.SELL_THROUGH_MIN, sold > listed, r
 end
 function PC:SellThrough(e)
     if not e then return false, false, nil end
-    return self:SellThroughOf(e.route, e.listed, e.soldDay or e.soldToday)
+    return self:SellThroughOf(e.route, e.listed, e.soldDay)
 end
 
 -- The same, one way of selling: on the AH (after its cut) or to a vendor (the recipe tables' two boxes)
@@ -3064,11 +3067,11 @@ function PC:MeetsMinV(e)
     return e ~= nil and e.vendorProfit ~= nil and e.vendorProfit > 0 and e.vendorProfitPct ~= nil and e.vendorProfitPct >= self:MinProfitPct()
 end
 
--- May this recipe be recommended? Not for the Auction House when none sold there today
--- (Settings: "Only recommend AH crafts that sold today")
+-- May this recipe be recommended? Not for the Auction House when none sold there in the last 24 hours
+-- (Settings: "Only recommend auction crafts that sold in the last day")
 function PC:SalesOK(e)
     if not e or e.route ~= "AH" or not (db and db.needSalesToday ~= false) then return true end
-    return (e.soldDay or e.soldToday or 0) > 0
+    return (e.soldDay or 0) > 0
 end
 
 -- Is the plan in hand made to earn gold? (Skill up and Gear upgrades plans aren't: the minimum
@@ -3385,7 +3388,7 @@ function PC:FlipCraftableRaw(e, budget)
     if not (lad and vend and p0) then return nil end
     local n, spend, why = 0, 0, "market"
     for _, s in ipairs(lad.steps) do
-        if s.p >= vend then why = "profit" break end
+        if s.p >= vend or (vend - s.p) < s.p * self:MinProfitPct() / 100 then why = "profit" break end
         local afford = math.floor((budget - spend) / s.p)
         local take = math.min(s.q, afford, self.MAX_CRAFTABLE - n)
         if take > 0 then n, spend = n + take, spend + take * s.p end
@@ -3730,7 +3733,7 @@ end
 function PC:AnalyzeRaw()
     local out = {}
     self._omap = nil -- recipes may have changed since last time
-    local today, minPct = self:SecondsToday(), self:MinProfitPct()
+    local minPct = self:MinProfitPct()
     local needSales = db.needSalesToday ~= false
     for recipeID, r in pairs(self:ShownRecipes()) do
         local quality, qualitySet = self:CraftQuality(r)
@@ -3765,13 +3768,11 @@ function PC:AnalyzeRaw()
         -- How many are already listed, and a "best bet" score that favors items that will actually sell
         local listed = self:Supply()[outID]
         local soldAt, soldMine = self:LastSold(outID)
-        -- Sold today (since midnight): estimated from scans, or your own sales if that's more; 0 when unknown
-        local est = self:SalesEstimate(outID, today)
-        local mine = self:MySales(self:ItemName(outID), today)
-        local soldToday = math.max(est or 0, mine or 0)
         local profitPct = (profit and cost and cost > 0) and (profit / cost * 100) or nil
-        -- the last 24 hours decide (since midnight knows next to nothing just after it)
-        local soldDay = math.max(self:SalesEstimate(outID, 86400) or 0, self:MySales(self:ItemName(outID), 86400) or 0)
+        -- Sold in the last 24 hours: estimated from scans, or your own sales if that's more; 0 when unknown
+        local est = self:SalesEstimate(outID, 86400)
+        local mine = self:MySales(self:ItemName(outID), 86400)
+        local soldDay = math.max(est or 0, mine or 0)
         -- best bets clear the minimum profit, and an AH craft only when some sold there in the last day and
         -- at least half as many as are listed now (else it won't sell in the window you post it)
         local salesOK = route ~= "AH" or not needSales or soldDay > 0
@@ -3807,11 +3808,10 @@ function PC:AnalyzeRaw()
             vendorProfitPct = (best.vendorProfit and cost and cost > 0) and (best.vendorProfit / cost * 100) or nil,
             noSalesToday = route == "AH" and needSales and soldDay <= 0 or nil, -- none in the last day: not recommended (PC:SalesOK)
             soldDay = soldDay,                        -- sold in the last 24 hours (the recommendations go by it)
+            soldDayKnown = est ~= nil or (mine or 0) > 0,
             bestOK = bestOK, hot = (bestOK and hot) or nil, -- a best bet (PC:BestBetScore ranks it); sold out over the last day
             lastSold = soldAt and (time() - soldAt) or nil,   -- seconds ago (sorts newest first)
             lastSoldDays = self:DaysAgo(soldAt),
-            soldToday = soldToday,
-            soldTodayKnown = est ~= nil or (mine or 0) > 0,
             lastSoldMine = soldMine,
         }
     end

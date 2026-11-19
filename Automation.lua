@@ -747,7 +747,7 @@ function Sell:SetPurge(on)
             self.purge = true
             for _, it in ipairs(list) do if holding[it.id] then PC.Learn:Purged(it.id) end end
         end
-        PC.Buy:Say(("|cffff8040Purging %d crafted item%s: each goes wherever pays more, even below cost.|r"):format(n, n == 1 and "" or "s"))
+        PC.Buy:Say(("|cffff8040Purging %d crafted item%s: each goes wherever it brings in more gold, even below cost.|r"):format(n, n == 1 and "" or "s"))
     else
         PC.Buy:Say("Purge off: crafted items sell only at a profit again.")
     end
@@ -879,7 +879,8 @@ function Sell:PurgeMatsList()
     -- (StoreList already leaves out what the plan needs)
     for _, it in ipairs(B and B.StoreList and B:StoreList() or {}) do
         local price = PC.SellPrice and PC:SellPrice(it.id) or 0
-        if (it.kind == "material" or it.kind == "stash") and price > 0 and not PC:IsTool(it.id) and not self:LossToVendor(it.id) then
+        if (it.kind == "material" or it.kind == "stash") and price > 0 and not PC:IsTool(it.id) and not self:LossToVendor(it.id)
+            and not (B.KeepMats and B:KeepMats()[it.id]) and not PC:NeverSell(it.id) then
             local n = it.qty
             if n > 0 then out[#out + 1] = { id = it.id, name = it.name or PC:ItemName(it.id) or ("item " .. it.id), n = n, value = price * n } end
         end
@@ -937,7 +938,7 @@ function Sell:AskPurge()
         title = "Purge crafted items?", sub = ("Clears bag space, about %s in all"):format(PC:Money(gold, false, true)),
         subColor = { 1, 0.82, 0 },
         sections = { { lines = names }, { lines = {
-            "Each sells wherever pays more (auction or vendor), even below what it cost.",
+            "Each sells wherever it brings in more gold (auction or vendor), even below what it cost.",
             "Untick any in the Plan tasks list to keep it.",
         }, bullets = false } },
         buttons = { { text = "Purge", onClick = function() Sell:SetPurge(true) end }, { text = "Cancel" } },
@@ -1043,7 +1044,8 @@ function Sell:ItemsRaw()
                 and (self.purge or not (cost and vend < cost)) -- (a leftover: never to a vendor at a loss)
             if vendor then hold = false end
         -- only when ProfitCrafter knows what these really cost you: never on a guess
-        elseif via ~= "AH" and vend > 0 and n > 0 and costKnown and cost and vend >= cost then
+        elseif via ~= "AH" and vend > 0 and n > 0 and costKnown and cost and vend >= cost
+            and (not price or tooCheap or vend >= price * (1 - self.AH_CUT)) then
             -- a vendor flip (the vendor pays more than it cost): to the vendor, AH or not
             vendor = true
         end
@@ -1221,7 +1223,7 @@ function Sell:Deposit(itemID, duration, qty)
         end
         local s = first[itemID]
         if s then
-            local ok, d = pcall(A.CalculateItemDeposit, ItemLocation:CreateFromBagAndSlot(s.bag, s.slot), duration, 1)
+            local ok, d = pcall(A.CalculateItemDeposit, ItemLocation:CreateFromBagAndSlot(s.bag, s.slot), duration, qty or 1)
             if ok and d then return d end
         end
     end

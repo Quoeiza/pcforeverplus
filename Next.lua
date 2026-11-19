@@ -1209,6 +1209,7 @@ function Next:FlipsSkip(flips)
         plan[e.id] = nil
     end
     if PC.cdb then PC.cdb.lastSkip = { plan = PC:PlanName(), items = removed, t = time() } end
+    if next(removed) then PC:PushUndo({ kind = "flips" }) end
     PC.Buy:Say(("Skipped %d vendor flip%s: taken out of the plan. Changed your mind? Type /pc undo to put them back."):format(#flips, #flips == 1 and "" or "s"))
     Next.flipsOK = nil
     if PC.cdb then PC.cdb.flipsOK = nil end

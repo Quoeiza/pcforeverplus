@@ -155,7 +155,6 @@ function Learn:Report()
         local parts = { ("%d posted, %d sold, %d back"):format(it.posted, it.sold, it.returned) }
         if r then parts[#parts + 1] = ("sells %d%%"):format(math.floor(r * 100 + 0.5)) end
         if it.sales > 0 then parts[#parts + 1] = ("~%.1fh to sell"):format(it.hours / it.sales) end
-        if it.cut > 0 then parts[#parts + 1] = ("undercuts %.1f%% deeper"):format(it.cut * 100) end
         if it.penalty > 0 then parts[#parts + 1] = ("ranked %d%% lower"):format(math.floor(it.penalty * 100 + 0.5)) end
         Print(("  %s: %s"):format(PC:ItemName(id) or ("item " .. id), table.concat(parts, ", ")))
     end

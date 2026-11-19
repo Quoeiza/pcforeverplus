@@ -64,7 +64,8 @@ local function NoteUser(who, applied)
     if not Share.prunedAt or time() - Share.prunedAt > 3600 then
         Share.prunedAt = time()
         for name, x in pairs(u) do
-            if time() - (x.seen or 0) > 30 * 86400 then u[name] = nil end
+            local age = time() - (x.seen or 0)
+            if age > 30 * 86400 or (not x.t and age > 86400) then u[name] = nil end
         end
     end
 end
@@ -413,7 +414,10 @@ end
 
 function Share:HeardPlan(who, body)
     local items = {}
-    for id, n in (body or ""):gmatch("(%d+):(%d+)") do items[tonumber(id)] = tonumber(n) end
+    for id, n in (body or ""):gmatch("(%d+):(%d+)") do
+        n = tonumber(n)
+        if n and n < 1e6 then items[tonumber(id)] = n end
+    end
     self:Coming()[who] = next(items) and { t = time(), items = items } or nil
     self.comingIndex = nil
 end
@@ -569,10 +573,12 @@ function Share:OnMessage(text, sender)
         local pkind = key:match("^(%a+):")
         if not PC.Places.KINDS[pkind] then return end
         local p = { kind = pkind, name = name, map = tonumber(map), x = tonumber(x), y = tonumber(y), zone = zone, seen = time() }
+        if not (p.map and p.x and p.y) then return end
+        -- (only the details SharePlace sends: anything else could overwrite the spot or its stock)
         for k, v in (extra or ""):gmatch("([%a]+)=([^;]*)") do
             if k == "repair" then p.repair = v == "true"
             elseif k == "tomap" or k == "tox" or k == "toy" or k == "secs" then p[k] = tonumber(v)
-            else p[k] = v end
+            elseif k == "prof" or k == "sub" or k == "tozone" or k == "via" then p[k] = v end
         end
         PC.Places:Heard(key, p)
         return
@@ -586,6 +592,7 @@ function Share:OnMessage(text, sender)
         local pkind = key:match("^(%a+):")
         if not PC.Places.KINDS[pkind] then return end
         local p = { kind = pkind, name = name, map = tonumber(map), x = tonumber(x), y = tonumber(y), zone = zone, seen = time() }
+        if not (p.map and p.x and p.y) then return end
         if stock ~= "" then
             p.stock = {}
             for id in stock:gmatch("%d+") do p.stock[tonumber(id)] = true end
@@ -613,7 +620,7 @@ function Share:OnMessage(text, sender)
     local applied = 0
     for id, p, q in body:gmatch("(%d+):(%d+):(%d+)") do
         id, p, q = tonumber(id), tonumber(p), tonumber(q)
-        if id and p and p > 0 and p < 1e10 then
+        if id and p and p > 0 and p < 1e10 and q < 1e7 then
             -- your own scan (or live listings read) of it in the last minute wins over anyone's report:
             -- yours is what's on the AH right now
             local t = checked[id]

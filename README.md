@@ -1,6 +1,6 @@
 # ProfitCrafter Forever Plus
 
-Version 0.4.7. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
+Version 0.4.8. An extended build of ProfitCrafter Forever 0.3.0 by MostlyNotBroken, for World of Warcraft: Forever. It is shared with the original developer for possible integration.
 
 The first commit is the unmodified 0.3.0 release, so diffing against it shows every change. Below is everything that is new or fixed compared with 0.3.0.
 
@@ -67,6 +67,7 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - A Refresh button on each recipe reads that recipe's price, listings and materials from the Auction House straight away, without a full scan. It sits at the right end of the row with Quick Buy and Add to plan.
 - Each tab starts in the order that matters there: Total Auction Profit on All professions and each profession, Total Vendor Profit on Vendor flips, and best bet order on Best bets, which has a Best bet order button to sort again. The line under the table says how it's sorted.
 - Auction flips on Vendor flips show their name in light blue instead of an "(auction flip)" tag that got cut off. Their tooltip still says what they are.
+- The Sold today column is now Sold in 24h: sales in the last 24 hours, the figure the recommendations go by. Since midnight knew next to nothing just after it.
 - Every table sorts on every column and remembers its sort. Each column has a two-line heading with a tooltip.
 - Columns are sized to fit their headings and values, and the name column gets the rest. Table text is slightly smaller, and the window is wider.
 - Money in a table is never cut off. The text shrinks, then the copper is dropped, then the silver.
@@ -91,6 +92,23 @@ To install, put the folder in `_forever_/Interface/AddOns/` and name it `ProfitC
 - A recipe's material cost was the cheapest listing times the amount it takes, so one cheap listing made a recipe look profitable on every tab. Everything a craft needs is now priced up the real listings, including what goes into materials you make yourself (the 20 Silk Cloth in a vest's 5 bolts). This applies to the Materials column, both profits, Profit %, every table and tooltip, Best bets, Make me gold and the Learn page.
 - Make me gold multiplied the cheapest price by the count while the cost climbed the listings. It overstated profit and could pick batches that lose money.
 - What you sell of an item a day was averaged over 14 days even when you started selling it yesterday, so posting and Make me gold held back the next batch of something that had just sold out. It now counts from your first sale in those 14 days.
+- With no sell route chosen, a craft went to a vendor whenever the vendor covered its cost, even when the Auction House paid far more. It now goes to the vendor only when that brings in at least as much.
+- Buying a separate auction (gear, bags) could pay above the price that keeps the craft at the minimum profit. A bid below the buyout was counted as a purchase.
+- Posting several of an item as separate auctions checked and held back the deposit for one of them.
+- Selling spare materials offered ones you had chosen to keep.
+- A full scan that came back empty wiped every price and counted everything as just sold. Your prices are now kept.
+- A profession the game lists after a gap (First Aid on some clients) was missed, and its recipes forgotten.
+- Auction flips counted every listing under the vendor price in Craftable at Profit, not only those making the minimum profit.
+- A plan's own choices (crafts skipped, materials bought instead of made, items kept) stayed behind when it was renamed or deleted, and came back in a new plan with that name.
+- /pc undo after skipping vendor flips undid an older removal instead.
+- The task list showed a skipped craft as well as the same craft back in the plan, its tick boxes said "skip this craft" on buy and sell rows, and its Auction rows were labelled AH.
+- Adding crafts from your bags blamed bag space when the market limit stopped them.
+- The plan page's Spend left out the posting deposits that the Task Button counts.
+- Greens queued for disenchanting could lose their place while the game was still loading their details.
+- Shared place details could overwrite a place's spot or stock, and a shared listed count had no upper limit.
+- The top row's Minimum profit %, Can afford and search showed on every page, though they only filter Recipes (and the search, History).
+- Several tooltips showed two different click hints, a spiked price read "Sells for 2g (counted at).", and dates were written month first.
+- Settings and History text still said "today", "AH" and a deeper undercut for unsold items that is never applied.
 - Stored live listings were used indefinitely, even after the item sold out or its price changed.
 
 ### Selling
